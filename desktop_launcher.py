@@ -7,6 +7,17 @@ import time
 import urllib.request
 import webbrowser
 
+# A PyInstaller --windowed build on Windows has no console at all, so
+# sys.stdout/sys.stderr are actually None (not just redirected) - uvicorn's
+# logging setup calls .isatty() on them to detect color support, which
+# crashes with "'NoneType' object has no attribute 'isatty'" otherwise.
+# macOS's windowed builds still get valid (if inert) stream objects, so this
+# never engages there.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
 # Must happen before `app` (and transitively live.auth/overlay.protocol/
 # overlay.render/monitor/clips/overlay.compose) is imported, so every
 # sync_playwright() call picks up the bundled Chromium, and every
