@@ -66,7 +66,7 @@ MAX_DOWNLOAD_RETRIES = 3  # plus the initial attempt = up to 4 tries total
 
 # Bump this on every release posted to GITHUB_REPO's Releases page - compared
 # against the latest release tag by /api/check-updates.
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "programming-my/Live-Tools"
 
 
@@ -612,11 +612,6 @@ def _run_job(url: str, poll_interval: int, stop_event: threading.Event, queue_it
                         json.dump({"event_url": url, "downloaded_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
                 except OSError as e:
                     state.log(f"Could not write metadata sidecar: {e}")
-
-                if _try_start_overlay_export(filename, url):
-                    state.log("Automatically exporting the auction overlay for this replay...")
-                else:
-                    state.log("Skipped automatic overlay export - an export is already running.")
             elif stop_event.is_set():
                 state.log("Download stopped by user - partial file removed.")
                 state.set_status("IDLE")

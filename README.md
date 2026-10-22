@@ -63,9 +63,8 @@ after another, instead of babysitting a single event at a time.
 
 ### Export Auction Overlay
 Extracts the pinned auctions from an event into a separate video file with a
-blue background, for editors to key against. Runs automatically after a
-replay finishes downloading - or paste an event URL here to (re-)export
-manually, e.g. with different calibration. Works even for an event you never
+blue background, for editors to key against. Paste an event URL here to
+export it, e.g. with custom calibration. Works even for an event you never
 downloaded a replay of, rendering directly from the event's own data instead
 (calibration fields are ignored in that case).
 
