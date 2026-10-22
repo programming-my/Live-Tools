@@ -1,0 +1,71 @@
+name: Build Windows app
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv\Scripts\pip install -r requirements.txt
+          .venv\Scripts\pip install pyinstaller pystray pillow
+
+      - name: Install Playwright Chromium
+        shell: pwsh
+        run: .venv\Scripts\python -m playwright install chromium
+
+      - name: Resolve bundled ffmpeg path
+        id: bins
+        shell: pwsh
+        run: |
+          $ffmpeg = .venv\Scripts\python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"
+          "ffmpeg=$ffmpeg" >> $env:GITHUB_OUTPUT
+
+      - name: Generate icon and tray image
+        shell: pwsh
+        run: |
+          .venv\Scripts\python -c "from PIL import Image; img = Image.open('static/favicon-32.png'); img.save('icon.ico'); img.save('trayicon.png')"
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          .venv\Scripts\pyinstaller --noconfirm --windowed --name "eBay Live Tools" `
+            --add-data "static;static" `
+            --add-data "overlay/template.html;overlay" `
+            --add-binary "${{ steps.bins.outputs.ffmpeg }};." `
+            --add-binary ".venv\Scripts\yt-dlp.exe;." `
+            --add-data "$env:LOCALAPPDATA\ms-playwright;ms-playwright" `
+            --add-data "trayicon.png;." `
+            --icon "icon.ico" `
+            desktop_launcher.py
+
+      - name: Zip app
+        shell: pwsh
+        run: Compress-Archive -Path "dist\eBay Live Tools\*" -DestinationPath "eBay Live Tools (Windows).zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eBay-Live-Tools-Windows
+          path: "eBay Live Tools (Windows).zip"
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "eBay Live Tools (Windows).zip" --clobber

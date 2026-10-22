@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>eBay Live Overlay (Mobile)</title>
+<link rel="stylesheet" href="/static/overlay_mobile.css">
+</head>
+<body>
+  <div class="overlay">
+    <div class="status-pill hidden" id="statusPill"></div>
+
+    <div class="header">
+      <span class="header-back" aria-hidden="true">⌄</span>
+      <img class="header-avatar hidden" id="headerAvatar" alt="" />
+      <div class="header-avatar-fallback" id="headerAvatarFallback"></div>
+      <span class="header-username" id="headerUsername"></span>
+    </div>
+
+    <div class="side-rail">
+      <div class="side-rail-row side-rail-viewers">
+        <span class="live-dot"></span>
+        <span id="viewerCount">0</span>
+      </div>
+      <div class="side-rail-row">
+        <svg class="side-rail-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="3" y="4" width="18" height="4" rx="1" stroke="currentColor" stroke-width="2"/>
+          <rect x="3" y="11" width="18" height="4" rx="1" stroke="currentColor" stroke-width="2"/>
+          <rect x="3" y="18" width="18" height="2" rx="1" fill="currentColor"/>
+        </svg>
+        <span>Items</span>
+      </div>
+      <div class="side-rail-row">
+        <svg class="side-rail-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="6" width="20" height="14" rx="2" stroke="currentColor" stroke-width="2"/>
+          <path d="M2 10H22" stroke="currentColor" stroke-width="2"/>
+        </svg>
+        <span>Wallet</span>
+      </div>
+      <div class="side-rail-row">
+        <span class="side-rail-dots">•••</span>
+        <span>More</span>
+      </div>
+    </div>
+
+    <div class="bottom-stack">
+      <div class="chat-panel" id="chatPanel">
+        <div class="chat-messages" id="chatMessages"></div>
+        <div class="pinned-message hidden" id="pinnedMessage">
+          <span class="pinned-icon" aria-hidden="true">📌</span>
+          <span class="pinned-body">
+            <span class="pinned-user" id="pinnedUser"></span>
+            <span class="pinned-text" id="pinnedText"></span>
+          </span>
+        </div>
+      </div>
+
+      <div class="comment-input">
+        <span class="comment-input-placeholder">Add comment...</span>
+        <span class="comment-input-heart" aria-hidden="true">♡</span>
+      </div>
+
+      <div class="auction-card hidden" id="auctionCard">
+        <div class="auction-title-row">
+          <div class="auction-title" id="auctionTitle"></div>
+          <span class="auction-chevron" aria-hidden="true">›</span>
+        </div>
+        <div class="auction-price" id="auctionPrice"></div>
+        <div class="auction-status-row hidden" id="auctionStatusRow">
+          <span class="auction-winner" id="auctionWinner"></span>
+          <span class="auction-timer" id="auctionTimer"></span>
+        </div>
+        <div class="auction-buttons">
+          <div class="btn-max-bid" id="maxBidBtn">Max bid</div>
+          <div class="btn-bid" id="bidPillContainer">
+            <div class="btn-bid-fill" id="bidPillFill">
+              <span id="bidPillText">Bid now</span>
+              <svg id="bidPillChevron" viewBox="135 17 24 21" xmlns="http://www.w3.org/2000/svg">
+                <path fill="#0c310d" d="M157.6803,29.0305l-8.3939,8.3941c-.5472.5464-1.4327.5464-1.9789,0-.5462-.5463-.5462-1.4321,0-1.9785l7.405-7.4049-7.405-7.4049c-.5462-.5464-.5462-1.4321,0-1.9785.5462-.5464,1.4317-.5464,1.9789,0l8.3939,8.3942c.5462.5464.5462,1.4322,0,1.9785ZM146.4887,29.0305l-8.3939,8.3941c-.5462.5464-1.4317.5464-1.9789,0-.5462-.5463-.5462-1.4321,0-1.9785l7.405-7.4049-7.405-7.4049c-.5462-.5464-.5462-1.4321,0-1.9785.5472-.5464,1.4327-.5464,1.9789,0l8.3939,8.3942c.5462.5464.5462,1.4322,0,1.9785Z"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script src="/static/overlay_mobile.js"></script>
+</body>
+</html>

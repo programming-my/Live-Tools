@@ -1,0 +1,397 @@
+:root {
+  --ebay-red: #e53238;
+  --ebay-red-bright: #f54e54;
+  --ebay-blue: #0064d2;
+  --ebay-blue-bright: #4d9fff;
+  --ebay-blue-hover: #0050a8;
+  --ebay-yellow: #f5af02;
+  --ebay-green: #86b817;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #0f1115;
+  color: #e6e8eb;
+}
+
+.container {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0 0 10px;
+}
+
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.settings-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.icon-btn {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  background: #2a2e38;
+  color: #e6e8eb;
+  border-radius: 8px;
+}
+
+.icon-btn:hover {
+  background: #363c49;
+}
+
+.settings-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  width: 280px;
+  z-index: 10;
+  background: #171a21;
+  border: 1px solid #2a2e38;
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.settings-divider {
+  border-top: 1px solid #2a2e38;
+  margin: 16px 0;
+}
+
+.version-label {
+  color: #565d6b;
+  font-size: 12px;
+}
+
+.update-result {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #9aa1ac;
+}
+
+.update-result a {
+  color: var(--ebay-blue-bright);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/* A quiet nod to eBay's four logo colors, without pulling in an actual
+   logo/image asset - just a thin brand-colored bar under the title. */
+.brand-bar {
+  display: flex;
+  width: 160px;
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 28px;
+}
+.brand-bar span {
+  flex: 1;
+}
+.brand-bar span:nth-child(1) { background: var(--ebay-red); }
+.brand-bar span:nth-child(2) { background: var(--ebay-blue); }
+.brand-bar span:nth-child(3) { background: var(--ebay-yellow); }
+.brand-bar span:nth-child(4) { background: var(--ebay-green); }
+
+h2 {
+  font-size: 16px;
+  margin: 32px 0 12px;
+  color: #9aa1ac;
+}
+
+.card {
+  background: #171a21;
+  border: 1px solid #2a2e38;
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+label {
+  display: block;
+  font-size: 13px;
+  color: #9aa1ac;
+  margin-bottom: 6px;
+  margin-top: 14px;
+}
+
+label:first-child {
+  margin-top: 0;
+}
+
+input[type="text"],
+input[type="number"],
+select {
+  width: 100%;
+  padding: 10px 12px;
+  background: #0f1115;
+  border: 1px solid #2a2e38;
+  border-radius: 8px;
+  color: #e6e8eb;
+  font-size: 14px;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus {
+  outline: none;
+  border-color: var(--ebay-blue);
+}
+
+input[readonly] {
+  color: #9aa1ac;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+button {
+  flex: 1;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--ebay-blue);
+  color: white;
+  transition: background 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--ebay-blue-hover);
+}
+
+button.secondary {
+  background: #2a2e38;
+  color: #e6e8eb;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #363c49;
+}
+
+.status-row button {
+  flex: none;
+  margin-left: auto;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.badge-idle { background: #2a2e38; color: #9aa1ac; }
+.badge-waiting { background: #3a2f12; color: var(--ebay-yellow); }
+.badge-live { background: #1f3310; color: var(--ebay-green); }
+.badge-ended { background: #3a2c18; color: #f97316; }
+.badge-downloading { background: #0d2a4a; color: var(--ebay-blue-bright); }
+.badge-done { background: #1f3310; color: var(--ebay-green); }
+.badge-error { background: #3a1517; color: var(--ebay-red-bright); }
+.badge-queued { background: #2a2e38; color: #9aa1ac; }
+.badge-active { background: #0d2a4a; color: var(--ebay-blue-bright); }
+.badge-skipped { background: #3a2f12; color: var(--ebay-yellow); }
+
+.hidden {
+  display: none;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 10px;
+  background: #0f1115;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #2a2e38;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--ebay-blue);
+  transition: width 0.3s ease;
+}
+
+#progressLabel {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #9aa1ac;
+}
+
+.log-details summary {
+  font-size: 13px;
+  color: #9aa1ac;
+  cursor: pointer;
+  user-select: none;
+}
+
+.log-details[open] summary {
+  margin-bottom: 14px;
+}
+
+.log {
+  height: 240px;
+  overflow-y: auto;
+  background: #0f1115;
+  border: 1px solid #2a2e38;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #9aa1ac;
+}
+
+.log-entry {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-entry .ts {
+  color: #565d6b;
+  margin-right: 8px;
+}
+
+#downloadLink {
+  display: inline-block;
+  color: var(--ebay-blue-bright);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.queue-list-empty {
+  color: #565d6b;
+  font-size: 13px;
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  background: #0f1115;
+  border: 1px solid #2a2e38;
+  border-radius: 6px;
+}
+
+.queue-item-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #9aa1ac;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-event-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #0f1115;
+  border: 1px solid #2a2e38;
+  border-radius: 6px;
+}
+
+.live-event-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.live-event-item-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.live-event-item-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.live-event-item-actions button {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.live-event-item-link {
+  font-size: 12px;
+  color: var(--ebay-blue-bright);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.clip-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.clip-row input {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.clip-row button {
+  flex: none;
+  padding: 10px 14px;
+  font-size: 13px;
+}

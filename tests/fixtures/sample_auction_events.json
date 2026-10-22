@@ -1,0 +1,85 @@
+{
+  "event_id": "sampleEvt1234567",
+  "auctions": [
+    {
+      "typename": "AuctionStarted",
+      "listingId": "128000000001",
+      "startedAt": "2026-08-01T12:00:00.000Z",
+      "endingAt": "2026-08-01T12:00:30.000Z",
+      "startingPrice": {
+        "original": {
+          "amount": 10.0,
+          "currencyCode": "USD"
+        }
+      },
+      "serverCreatedAt": 1785585600000
+    },
+    {
+      "typename": "AuctionNewBidLeader",
+      "listingId": "128000000001",
+      "winningBid": {
+        "original": {
+          "amount": 12.0,
+          "currencyCode": "USD"
+        }
+      },
+      "bidder": {
+        "userId": "u1",
+        "userName": "alice"
+      },
+      "serverCreatedAt": 1785585605000
+    },
+    {
+      "typename": "AuctionNewBidLeader",
+      "listingId": "128000000001",
+      "winningBid": {
+        "original": {
+          "amount": 15.0,
+          "currencyCode": "USD"
+        }
+      },
+      "bidder": {
+        "userId": "u2",
+        "userName": "bob"
+      },
+      "serverCreatedAt": 1785585627000
+    },
+    {
+      "typename": "BidTimeExtended",
+      "listingId": "128000000001",
+      "endingAt": "2026-08-01T12:00:38.000Z",
+      "serverCreatedAt": 1785585628000
+    },
+    {
+      "typename": "AuctionEnded",
+      "listingId": "128000000001",
+      "endedAt": "2026-08-01T12:00:39.000Z",
+      "serverCreatedAt": 1785585639000
+    },
+    {
+      "typename": "AuctionWillStart",
+      "listingId": "128000000002",
+      "serverCreatedAt": 1785585641000
+    },
+    {
+      "typename": "AuctionStarted",
+      "listingId": "128000000002",
+      "startedAt": "2026-08-01T12:00:44.000Z",
+      "endingAt": "2026-08-01T12:01:14.000Z",
+      "startingPrice": {
+        "original": {
+          "amount": 20.0,
+          "currencyCode": "USD"
+        }
+      },
+      "serverCreatedAt": 1785585644000
+    },
+    {
+      "typename": "SomeChatMessage",
+      "listingId": "128000000002",
+      "text": "nice item!",
+      "userName": "carol",
+      "serverCreatedAt": 1785585647000
+    }
+  ]
+}

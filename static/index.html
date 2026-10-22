@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>eBay Live Tools</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header-row">
+      <div>
+        <h1>eBay Live Tools</h1>
+        <div class="brand-bar"><span></span><span></span><span></span><span></span></div>
+      </div>
+
+      <div class="settings-menu">
+        <button id="settingsGearBtn" class="icon-btn" type="button" aria-label="Settings" title="Settings">⚙</button>
+        <div id="settingsDropdown" class="settings-dropdown hidden">
+          <label for="downloadsDirInput">Downloads folder</label>
+          <p style="color: #9aa1ac; font-size: 12px; margin: -4px 0 10px;">
+            Where replay downloads, clip exports, and auction overlay exports are saved.
+          </p>
+          <input id="downloadsDirInput" type="text" placeholder="/Users/you/Downloads/eBay Live Tools" />
+
+          <div class="actions">
+            <button id="saveSettingsBtn">Save</button>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <div class="status-row" style="margin-bottom: 0;">
+            <span id="appVersionLabel" class="version-label"></span>
+            <button id="checkUpdatesBtn" class="secondary" type="button">Check for Updates</button>
+          </div>
+          <div id="updateResultText" class="update-result"></div>
+        </div>
+      </div>
+    </div>
+
+    <h2>Live Replay Downloader</h2>
+    <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
+      Checks the event page every few seconds (the poll interval below) to see whether
+      it's still live. Once it detects the event has ended and a replay is ready, the
+      download starts automatically - no need to keep checking back yourself.
+    </p>
+
+    <div class="card">
+      <label for="url">eBay Live event URL</label>
+      <input id="url" type="text" placeholder="https://www.ebay.com/live/events/..." />
+
+      <label for="interval">Poll interval (seconds)</label>
+      <input id="interval" type="number" value="15" min="3" />
+
+      <div class="actions">
+        <button id="startBtn">Start monitoring</button>
+        <button id="stopBtn" class="secondary">Stop</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="status-row">
+        <span>Status:</span>
+        <span id="statusBadge" class="badge badge-idle">IDLE</span>
+      </div>
+
+      <div id="m3u8Row" class="hidden">
+        <label>Manifest URL</label>
+        <input id="m3u8Url" type="text" readonly />
+      </div>
+
+      <div id="progressRow" class="hidden">
+        <label>Download progress</label>
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill" style="width: 0%"></div>
+        </div>
+        <span id="progressLabel">0%</span>
+      </div>
+
+      <div id="downloadRow" class="hidden">
+        <a id="downloadLink" href="#" download>Download replay file</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <details class="log-details">
+        <summary>Log</summary>
+        <div id="log" class="log"></div>
+      </details>
+    </div>
+
+    <h2>Download Queue</h2>
+
+    <div class="card">
+      <label for="queueUrl">eBay Live event URL</label>
+      <input id="queueUrl" type="text" placeholder="https://www.ebay.com/live/events/..." />
+
+      <div class="actions">
+        <button id="queueAddBtn">Add to queue</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="status-row">
+        <label style="margin: 0;">Queue</label>
+        <span id="queuePausedBadge" class="badge badge-skipped hidden">PAUSED</span>
+        <button id="resumeQueueBtn" class="secondary" disabled>Resume queue</button>
+        <button id="clearQueueBtn" class="secondary">Clear queue</button>
+      </div>
+      <div id="queueList" class="queue-list"></div>
+    </div>
+
+    <h2>Export Auction Overlay</h2>
+    <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
+      Extracts pinned auctions into a separate video file with blue background for editors
+      to use. Runs automatically after a replay finishes downloading. Paste an event URL here to
+      (re-)export the overlay manually, e.g. with different calibration - or for an event
+      you never downloaded a replay of, in which case it renders directly from the event's
+      own data instead (calibration fields are ignored in that case).
+    </p>
+
+    <div class="card">
+      <label for="overlayExportEventUrl">eBay Live event URL</label>
+      <input id="overlayExportEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
+
+      <div class="actions">
+        <input id="overlayExportTimeOffset" type="number" step="0.1" placeholder="Time offset (s), auto" title="Seconds to add to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
+        <input id="overlayExportTimeScale" type="number" step="0.0001" placeholder="Time scale, auto" title="Multiplier applied to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
+      </div>
+
+      <div class="actions">
+        <button id="overlayExportBtn">Export overlay</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="status-row">
+        <label style="margin: 0;">Export status</label>
+        <span id="overlayExportStatusBadge" class="badge badge-idle hidden">IDLE</span>
+        <button id="overlayExportClearBtn" class="secondary">Clear</button>
+      </div>
+
+      <div id="overlayExportProgressRow" class="hidden">
+        <label>Export progress</label>
+        <div class="progress-bar">
+          <div id="overlayExportProgressFill" class="progress-fill" style="width: 0%"></div>
+        </div>
+        <span id="overlayExportProgressLabel">0%</span>
+      </div>
+
+      <div id="overlayExportDownloadRow" class="hidden">
+        <a id="overlayExportDownloadLink" href="#" download>Download overlay video</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <details class="log-details">
+        <summary>Export log</summary>
+        <div id="overlayExportLog" class="log"></div>
+      </details>
+    </div>
+
+    <h2>Download Clip</h2>
+    <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
+      Extracts short clips by timestamp from an event's replay. Reuses an already-downloaded
+      file if you have one; otherwise clips directly from the live replay manifest - either
+      way, no full download of the whole event is needed just to grab a clip.
+    </p>
+
+    <div class="card">
+      <label for="clipExportEventUrl">eBay Live event URL</label>
+      <input id="clipExportEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
+
+      <label>Clips (start/end timestamps - mm:ss or hh:mm:ss)</label>
+      <div id="clipRows"></div>
+
+      <div class="actions">
+        <button id="clipAddRowBtn" class="secondary" type="button">Add clip</button>
+      </div>
+
+      <div class="actions">
+        <button id="clipExportBtn">Extract clips</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="status-row">
+        <label style="margin: 0;">Clip export status</label>
+        <span id="clipExportStatusBadge" class="badge badge-idle hidden">IDLE</span>
+        <button id="clipExportClearBtn" class="secondary">Clear</button>
+      </div>
+      <div id="clipResultsList" class="queue-list"></div>
+    </div>
+
+    <div class="card">
+      <details class="log-details">
+        <summary>Clip export log</summary>
+        <div id="clipExportLog" class="log"></div>
+      </details>
+    </div>
+
+    <h2>Chat and Auction Monitor</h2>
+    <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
+      Extracts chat and auction data in real time while the event is live. Talent View is
+      optimized for vertical monitors to show chat and auctions. Copy OBS URL to display the
+      full eBay Live UI as a browser source.
+    </p>
+
+    <div class="card">
+      <label for="liveEventUrl">eBay Live event URL</label>
+      <input id="liveEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
+
+      <div class="actions">
+        <button id="liveStartBtn">Start watching</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Watched events</label>
+      <div id="liveEventsList" class="queue-list"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/live.js"></script>
+</body>
+</html>
