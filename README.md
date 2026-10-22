@@ -80,9 +80,17 @@ the current auction card (title/price/winner/countdown) plus a live chat
 panel, updating in real time while the event is live. Paste an event URL
 into this section and click **Start watching**; each watched event then
 gives you:
-- **Open preview** - the overlay page with chat font-size controls visible.
+- **Open Talent View** - the overlay page with chat font-size controls visible.
 - **Copy OBS URL** - the same page with controls hidden, for a clean
   browser-source capture in OBS.
+
+Both links work from anywhere, not just this machine - the first click
+starts a [Cloudflare quick tunnel](https://github.com/cloudflare/cloudflared)
+automatically (a few seconds' delay), reused for every link after that. Only
+the overlay pages themselves are ever reachable through it - the downloader,
+queue, and settings stay local-only no matter what. There's still no login
+on the overlay pages, though, so treat the link as sensitive while it's live,
+and it stops working once the app quits (a fresh link is generated next time).
 
 Card visibility is pin-driven, not timer-based: it appears the moment an
 item is pinned ("starting soon"), moves through live bidding once the
@@ -120,4 +128,11 @@ uvicorn app:app --reload --port 8000
 
 Then open http://localhost:8000. This runs the exact same app as the
 packaged `.app`, just from source - useful for development, or for running
-on Linux/Windows where the packaged build isn't available.
+on Linux/Windows where the packaged build isn't available. It also starts a
+second internal server on port 8766 for the overlay-only `edge_app` (see
+`tunnel.py`), matching the packaged build.
+
+To test the shareable Talent View / OBS URL links from source, install
+`cloudflared` separately (e.g. `brew install cloudflared`) - the packaged
+builds bundle it automatically, but a source checkout relies on it being on
+your `PATH`.

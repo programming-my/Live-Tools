@@ -4,7 +4,11 @@
 a = Analysis(
     ['desktop_launcher.py'],
     pathex=[],
-    binaries=[('/tmp/ebay-tools-build/ffmpeg', '.'), ('/tmp/ebay-tools-build/yt-dlp', '.')],
+    binaries=[
+        ('/tmp/ebay-tools-build/ffmpeg', '.'),
+        ('/tmp/ebay-tools-build/yt-dlp', '.'),
+        ('/tmp/ebay-tools-build/cloudflared', '.'),
+    ],
     datas=[('static', 'static'), ('overlay/template.html', 'overlay')],
     hiddenimports=[],
     hookspath=[],

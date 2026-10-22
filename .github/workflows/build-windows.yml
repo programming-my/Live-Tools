@@ -36,6 +36,10 @@ jobs:
           $ffmpeg = .venv\Scripts\python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"
           "ffmpeg=$ffmpeg" >> $env:GITHUB_OUTPUT
 
+      - name: Download cloudflared
+        shell: pwsh
+        run: Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
       - name: Generate icon and tray image
         shell: pwsh
         run: |
@@ -49,6 +53,7 @@ jobs:
             --add-data "overlay/template.html;overlay" `
             --add-binary "${{ steps.bins.outputs.ffmpeg }};." `
             --add-binary ".venv\Scripts\yt-dlp.exe;." `
+            --add-binary "cloudflared.exe;." `
             --add-data "$env:LOCALAPPDATA\ms-playwright;ms-playwright" `
             --add-data "trayicon.png;." `
             --icon "icon.ico" `

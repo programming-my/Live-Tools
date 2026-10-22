@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import threading
@@ -33,10 +34,17 @@ if getattr(sys, "frozen", False):
 
 import uvicorn
 
+import tunnel
 from app import app
 
 HOST = "127.0.0.1"
 PORT = 8765
+
+# tunnel.stop_tunnel() on normal interpreter exit (Ctrl+C in dev, Cmd+Q /
+# Dock-quit on macOS). The Windows tray icon's Quit handler below calls
+# os._exit(0), which bypasses atexit entirely, so it calls this explicitly
+# too - otherwise a cloudflared process could be left running after quit.
+atexit.register(tunnel.stop_tunnel)
 
 
 def _already_running() -> bool:
@@ -64,7 +72,7 @@ def _run_tray_icon() -> None:
     image = Image.open(os.path.join(sys._MEIPASS, "trayicon.png"))
     menu = pystray.Menu(
         pystray.MenuItem("Open eBay Live Tools", lambda icon, item: webbrowser.open(f"http://{HOST}:{PORT}")),
-        pystray.MenuItem("Quit", lambda icon, item: (icon.stop(), os._exit(0))),
+        pystray.MenuItem("Quit", lambda icon, item: (tunnel.stop_tunnel(), icon.stop(), os._exit(0))),
     )
     pystray.Icon("eBay Live Tools", image, "eBay Live Tools", menu).run()
 

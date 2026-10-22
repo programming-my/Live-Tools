@@ -13,12 +13,14 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import requests
+import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import clips
+import tunnel
 from app_paths import app_support_dir
 from download_queue import QueueState
 from live.auth import extract_event_id
@@ -1063,3 +1065,36 @@ async def live_overlay_ws(websocket: WebSocket, event_id: str) -> None:
         pass
     finally:
         session.broadcaster.discard(websocket)
+
+
+@app.get("/api/tunnel-url")
+def get_tunnel_url() -> dict:
+    """Lazily starts (or reuses) a cloudflared tunnel to edge_app - see
+    tunnel.py and desktop_launcher.py's second uvicorn server on
+    tunnel.EDGE_PORT - so Talent View / OBS URL links work from anywhere,
+    not just this machine."""
+    try:
+        return {"url": tunnel.get_or_start_tunnel_url()}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# edge_app exposes only the overlay pages, their static assets, and the
+# websocket - never the downloader, queue, or settings - since it's the only
+# thing ever reachable through the tunnel above, which has no authentication.
+edge_app = FastAPI()
+edge_app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+edge_app.get("/overlay/{event_id}")(live_overlay_page)
+edge_app.get("/overlay/{event_id}/mobile")(live_overlay_mobile_page)
+edge_app.websocket("/ws/{event_id}")(live_overlay_ws)
+
+
+@app.on_event("startup")
+def _start_edge_server() -> None:
+    """Started here (rather than only in desktop_launcher.py) so edge_app
+    comes up the same way whether the app is launched as a packaged build or
+    run from source via `uvicorn app:app --reload` for development."""
+    threading.Thread(
+        target=lambda: uvicorn.run(edge_app, host="127.0.0.1", port=tunnel.EDGE_PORT, log_level="warning"),
+        daemon=True,
+    ).start()

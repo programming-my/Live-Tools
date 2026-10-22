@@ -36,16 +36,61 @@ async function stopLiveEvent(eventId) {
   refreshLiveEvents();
 }
 
-function openTalentView(eventId) {
-  window.open(`/overlay/${encodeURIComponent(eventId)}`, "_blank");
+// Cached across calls (and across every button click) so the tunnel only
+// ever gets started once per app run - see /api/tunnel-url (tunnel.py).
+let tunnelUrlPromise = null;
+
+function getTunnelUrl() {
+  if (!tunnelUrlPromise) {
+    tunnelUrlPromise = fetch("/api/tunnel-url")
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || "Could not start the sharing tunnel.");
+        }
+        return (await res.json()).url;
+      })
+      .catch((err) => {
+        tunnelUrlPromise = null; // let a later click retry instead of caching the failure
+        throw err;
+      });
+  }
+  return tunnelUrlPromise;
 }
 
-function copyObsUrl(eventId) {
-  const url = `${location.origin}/overlay/${encodeURIComponent(eventId)}/mobile`;
-  navigator.clipboard.writeText(url).then(
-    () => alert("OBS browser-source URL copied to clipboard."),
-    () => prompt("Copy this URL:", url),
-  );
+async function withTunnelButtonState(button, action) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Starting tunnel...";
+  try {
+    await action();
+  } catch (err) {
+    alert(err.message || "Could not start the sharing tunnel.");
+  } finally {
+    // If the live-events list re-rendered meanwhile, this button is already
+    // detached from the page - harmless, the fresh one already shows the
+    // normal text.
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+function openTalentView(eventId, button) {
+  return withTunnelButtonState(button, async () => {
+    const base = await getTunnelUrl();
+    window.open(`${base}/overlay/${encodeURIComponent(eventId)}`, "_blank");
+  });
+}
+
+function copyObsUrl(eventId, button) {
+  return withTunnelButtonState(button, async () => {
+    const base = await getTunnelUrl();
+    const url = `${base}/overlay/${encodeURIComponent(eventId)}/mobile`;
+    navigator.clipboard.writeText(url).then(
+      () => alert("OBS browser-source URL copied to clipboard."),
+      () => prompt("Copy this URL:", url),
+    );
+  });
 }
 
 function renderLiveEvents(events) {
@@ -82,12 +127,12 @@ function renderLiveEvents(events) {
     const previewBtn = document.createElement("button");
     previewBtn.className = "secondary";
     previewBtn.textContent = "Open Talent View";
-    previewBtn.addEventListener("click", () => openTalentView(event.event_id));
+    previewBtn.addEventListener("click", () => openTalentView(event.event_id, previewBtn));
 
     const copyBtn = document.createElement("button");
     copyBtn.className = "secondary";
     copyBtn.textContent = "Copy OBS URL";
-    copyBtn.addEventListener("click", () => copyObsUrl(event.event_id));
+    copyBtn.addEventListener("click", () => copyObsUrl(event.event_id, copyBtn));
 
     const stopBtn = document.createElement("button");
     stopBtn.textContent = "Stop";
