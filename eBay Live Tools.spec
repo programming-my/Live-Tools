@@ -1,4 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# Chromium (~/Library/Caches/ms-playwright) is NOT bundled here as `datas` -
+# PyInstaller's own binary analysis tries to re-sign the nested Chromium.app
+# bundle inside it and fails outright (SystemError: Failed to process
+# binary ... "Google Chrome for Testing"). Instead, after running
+# `pyinstaller --noconfirm "eBay Live Tools.spec"`, bundle it manually:
+#
+#   rm -rf "dist/eBay Live Tools.app/Contents/Frameworks/ms-playwright/.links"  # if present from a previous run
+#   cp -R ~/Library/Caches/ms-playwright "dist/eBay Live Tools.app/Contents/Frameworks/ms-playwright"
+#   rm -rf "dist/eBay Live Tools.app/Contents/Frameworks/ms-playwright/.links"  # plain text, breaks --deep codesign
+#   ln -s "../Frameworks/ms-playwright" "dist/eBay Live Tools.app/Contents/Resources/ms-playwright"
+#   codesign --force --deep -s - "dist/eBay Live Tools.app"
+#
+# It MUST go in Contents/Frameworks, not Contents/Resources - that's the
+# directory sys._MEIPASS actually resolves to at runtime (confirmed
+# empirically: PyInstaller's own `binaries=` entries below land for real in
+# Frameworks, with Resources holding only a symlink back to them). Putting it
+# in Resources instead shipped silently broken in v1.1.0/v1.2.0: Playwright
+# would fail with "Executable doesn't exist at .../Frameworks/ms-playwright/
+# .../chrome-headless-shell" only once an actual live event was watched,
+# since nothing else bundled this way is exercised by the other features.
 
 
 a = Analysis(
