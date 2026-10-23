@@ -25,6 +25,9 @@
 # the Windows workflow's "Live.Tools.v<version>.Windows.zip"), e.g.:
 #   cd dist && ditto -c -k --sequesterRsrc --keepParent \
 #     "eBay Live Tools.app" "Live.Tools.v1.3.0.MacOS.zip"
+#
+# GitHub release title: "Live Tools v<APP_VERSION>" (tag stays "v<APP_VERSION>"),
+# e.g. tag "v1.3.0" with title "Live Tools v1.3.0".
 
 
 a = Analysis(
