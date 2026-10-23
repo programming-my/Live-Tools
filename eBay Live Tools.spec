@@ -20,6 +20,11 @@
 # would fail with "Executable doesn't exist at .../Frameworks/ms-playwright/
 # .../chrome-headless-shell" only once an actual live event was watched,
 # since nothing else bundled this way is exercised by the other features.
+#
+# Zip/release asset naming: "Live.Tools.v<APP_VERSION>.MacOS.zip" (matches
+# the Windows workflow's "Live.Tools.v<version>.Windows.zip"), e.g.:
+#   cd dist && ditto -c -k --sequesterRsrc --keepParent \
+#     "eBay Live Tools.app" "Live.Tools.v1.3.0.MacOS.zip"
 
 
 a = Analysis(

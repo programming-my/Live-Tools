@@ -18,6 +18,18 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "release") {
+            $version = "${{ github.event.release.tag_name }}"
+          } else {
+            $raw = python -c "import re; print(re.search(r'APP_VERSION = \"(.+)\"', open('app.py').read()).group(1))"
+            $version = "v$raw"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Install dependencies
         shell: pwsh
         run: |
@@ -61,16 +73,16 @@ jobs:
 
       - name: Zip app
         shell: pwsh
-        run: Compress-Archive -Path "dist\eBay Live Tools\*" -DestinationPath "eBay Live Tools (Windows).zip"
+        run: Compress-Archive -Path "dist\eBay Live Tools\*" -DestinationPath "Live.Tools.${{ steps.version.outputs.version }}.Windows.zip"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: eBay-Live-Tools-Windows
-          path: "eBay Live Tools (Windows).zip"
+          name: Live-Tools-Windows
+          path: "Live.Tools.${{ steps.version.outputs.version }}.Windows.zip"
 
       - name: Attach to release
         if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "eBay Live Tools (Windows).zip" --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" "Live.Tools.${{ steps.version.outputs.version }}.Windows.zip" --clobber
