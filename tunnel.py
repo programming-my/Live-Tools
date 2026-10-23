@@ -4,11 +4,15 @@ import os
 import queue
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 from typing import Optional
+
+import requests
 
 EDGE_PORT = 8766
 
@@ -20,6 +24,10 @@ else:
     CLOUDFLARED_BIN = shutil.which("cloudflared")
 
 _URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+# cloudflared prints the public URL as soon as it's assigned, but its own
+# banner warns "it may take some time to be reachable" - this later log line
+# is the real signal that the tunnel connection is actually registered.
+_REGISTERED_RE = re.compile(r"Registered tunnel connection")
 
 _lock = threading.Lock()
 _process: Optional[subprocess.Popen] = None
@@ -31,7 +39,61 @@ def _pump_lines_into_queue(stream, line_queue: "queue.Queue[str]") -> None:
         line_queue.put(line)
 
 
-def get_or_start_tunnel_url(timeout: float = 20.0) -> str:
+def _dns_resolves_raw(hostname: str, resolver: str = "1.1.1.1", timeout: float = 2.0) -> bool:
+    """Queries a public resolver directly over raw UDP (hand-rolled DNS wire
+    protocol, A-record query) instead of going through socket.getaddrinfo()/
+    the OS's own stub resolver - the OS resolver (e.g. macOS's
+    mDNSResponder) can cache an early failed lookup for a brand new
+    *.trycloudflare.com subdomain for far longer than the record actually
+    takes to become live, which `dig`/`host` don't hit (they bypass that
+    cache) but `requests`/`socket.getaddrinfo` do. Querying this way first
+    means the OS resolver's own first-ever lookup for this hostname only
+    happens once the record is confirmed live elsewhere, so it isn't the one
+    caching a stale negative result. (Not DNS-over-HTTPS - some networks
+    block known DoH endpoints outright; this is identical in shape to any
+    other DNS traffic.)"""
+    transaction_id = os.urandom(2)
+    header = transaction_id + b"\x01\x00" + b"\x00\x01\x00\x00\x00\x00\x00\x00"
+    question = b"".join(bytes([len(part)]) + part.encode() for part in hostname.split(".")) + b"\x00"
+    question += b"\x00\x01\x00\x01"  # QTYPE=A, QCLASS=IN
+    packet = header + question
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            sock.sendto(packet, (resolver, 53))
+            response, _ = sock.recvfrom(512)
+    except OSError:
+        return False
+    if len(response) < 12 or response[:2] != transaction_id:
+        return False
+    rcode = struct.unpack("!H", response[2:4])[0] & 0x000F
+    ancount = struct.unpack("!H", response[6:8])[0]
+    return rcode == 0 and ancount > 0
+
+
+def _wait_until_reachable(url: str, timeout: float) -> bool:
+    """Even after cloudflared reports its connection registered, the edge
+    can take another moment to actually become resolvable/routable -
+    anywhere from well under a second to tens of seconds in practice."""
+    hostname = url.split("://", 1)[-1].split("/", 1)[0]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _dns_resolves_raw(hostname):
+            break
+        time.sleep(0.5)
+    else:
+        return False
+
+    while time.monotonic() < deadline:
+        try:
+            requests.get(url, timeout=3)
+            return True
+        except requests.RequestException:
+            time.sleep(0.5)
+    return False
+
+
+def get_or_start_tunnel_url(timeout: float = 90.0) -> str:
     """Starts a cloudflared quick tunnel to the edge server (see app.py's
     edge_app / desktop_launcher.py's EDGE_PORT server) on first call, and
     returns its public https://*.trycloudflare.com URL - cached and reused
@@ -61,6 +123,7 @@ def get_or_start_tunnel_url(timeout: float = 20.0) -> str:
         reader = threading.Thread(target=_pump_lines_into_queue, args=(_process.stdout, line_queue), daemon=True)
         reader.start()
 
+        candidate_url: Optional[str] = None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -68,10 +131,16 @@ def get_or_start_tunnel_url(timeout: float = 20.0) -> str:
                 line = line_queue.get(timeout=max(remaining, 0))
             except queue.Empty:
                 break
-            match = _URL_RE.search(line)
-            if match:
-                _tunnel_url = match.group(0)
-                return _tunnel_url
+            if candidate_url is None:
+                match = _URL_RE.search(line)
+                if match:
+                    candidate_url = match.group(0)
+            if candidate_url and _REGISTERED_RE.search(line):
+                remaining = deadline - time.monotonic()
+                if _wait_until_reachable(candidate_url, timeout=max(remaining, 10.0)):
+                    _tunnel_url = candidate_url
+                    return _tunnel_url
+                break
             if _process.poll() is not None:
                 break
 

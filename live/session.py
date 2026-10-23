@@ -5,6 +5,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
+import tunnel
 from .broadcast import Broadcaster
 from .listener import run_listener
 from .meta import LiveMeta
@@ -29,15 +30,52 @@ class EventSession:
         self.broadcaster = Broadcaster()
         self.stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
+        self._tunnel_ready = False
+        self._tunnel_task: Optional[asyncio.Task] = None
+        self._pending_live_message: Optional[str] = None
 
     def log(self, message: str) -> None:
         self.logs.append({"ts": datetime.now(timezone.utc).isoformat(), "msg": message})
 
     def _on_status(self, status: str, message: str) -> None:
+        if status == "live" and not self._tunnel_ready:
+            # Hold off showing "live" until the sharing tunnel (see tunnel.py)
+            # is also ready, so Open Talent View / Copy OBS URL are instantly
+            # usable the moment this event does show live - no separate wait
+            # on first click. Runs concurrently with the listener's own
+            # connection, so it rarely adds to the wait at all.
+            self._pending_live_message = message
+            self.status = "connecting"
+            self.status_message = "Waiting for the sharing tunnel..."
+            return
+        self._pending_live_message = None
         self.status = status
         self.status_message = message
 
+    # Cloudflare's free "quick tunnels" come with no uptime/latency guarantee
+    # and can occasionally take much longer than usual to become reachable.
+    # This bounds how long "live" waits on it specifically - tunnel.py's own
+    # (longer) internal timeout keeps trying in the background regardless,
+    # so Open Talent View / Copy OBS URL still pick it up later if it
+    # finishes after this gate gives up.
+    _TUNNEL_GATE_TIMEOUT = 30.0
+
+    async def _ensure_tunnel(self) -> None:
+        try:
+            await asyncio.wait_for(asyncio.to_thread(tunnel.get_or_start_tunnel_url), timeout=self._TUNNEL_GATE_TIMEOUT)
+        except asyncio.TimeoutError:
+            self.log("Sharing tunnel is taking longer than usual - continuing without waiting further for it.")
+        except Exception as e:
+            self.log(f"Sharing tunnel unavailable ({e}); Talent View/OBS links will only work on this machine.")
+        finally:
+            self._tunnel_ready = True
+            if self._pending_live_message is not None:
+                self.status = "live"
+                self.status_message = self._pending_live_message
+                self._pending_live_message = None
+
     def start(self) -> None:
+        self._tunnel_task = asyncio.create_task(self._ensure_tunnel())
         self._task = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
@@ -53,6 +91,8 @@ class EventSession:
         self.stop_event.set()
         if self._task is not None:
             self._task.cancel()
+        if self._tunnel_task is not None:
+            self._tunnel_task.cancel()
 
     def initial_messages(self) -> list[dict]:
         """Sent to a browser client right after it connects, so it doesn't wait
