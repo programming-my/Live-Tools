@@ -71,10 +71,10 @@ def _run_tray_icon() -> None:
 
     image = Image.open(os.path.join(sys._MEIPASS, "trayicon.png"))
     menu = pystray.Menu(
-        pystray.MenuItem("Open eBay Live Tools", lambda icon, item: webbrowser.open(f"http://{HOST}:{PORT}")),
+        pystray.MenuItem("Open Live Tools", lambda icon, item: webbrowser.open(f"http://{HOST}:{PORT}")),
         pystray.MenuItem("Quit", lambda icon, item: (tunnel.stop_tunnel(), icon.stop(), os._exit(0))),
     )
-    pystray.Icon("eBay Live Tools", image, "eBay Live Tools", menu).run()
+    pystray.Icon("Live Tools", image, "Live Tools", menu).run()
 
 
 def main() -> None:

@@ -4,13 +4,13 @@
 # PyInstaller's own binary analysis tries to re-sign the nested Chromium.app
 # bundle inside it and fails outright (SystemError: Failed to process
 # binary ... "Google Chrome for Testing"). Instead, after running
-# `pyinstaller --noconfirm "eBay Live Tools.spec"`, bundle it manually:
+# `pyinstaller --noconfirm "Live Tools.spec"`, bundle it manually:
 #
-#   rm -rf "dist/eBay Live Tools.app/Contents/Frameworks/ms-playwright/.links"  # if present from a previous run
-#   cp -R ~/Library/Caches/ms-playwright "dist/eBay Live Tools.app/Contents/Frameworks/ms-playwright"
-#   rm -rf "dist/eBay Live Tools.app/Contents/Frameworks/ms-playwright/.links"  # plain text, breaks --deep codesign
-#   ln -s "../Frameworks/ms-playwright" "dist/eBay Live Tools.app/Contents/Resources/ms-playwright"
-#   codesign --force --deep -s - "dist/eBay Live Tools.app"
+#   rm -rf "dist/Live Tools.app/Contents/Frameworks/ms-playwright/.links"  # if present from a previous run
+#   cp -R ~/Library/Caches/ms-playwright "dist/Live Tools.app/Contents/Frameworks/ms-playwright"
+#   rm -rf "dist/Live Tools.app/Contents/Frameworks/ms-playwright/.links"  # plain text, breaks --deep codesign
+#   ln -s "../Frameworks/ms-playwright" "dist/Live Tools.app/Contents/Resources/ms-playwright"
+#   codesign --force --deep -s - "dist/Live Tools.app"
 #
 # It MUST go in Contents/Frameworks, not Contents/Resources - that's the
 # directory sys._MEIPASS actually resolves to at runtime (confirmed
@@ -24,10 +24,16 @@
 # Zip/release asset naming: "Live.Tools.v<APP_VERSION>.MacOS.zip" (matches
 # the Windows workflow's "Live.Tools.v<version>.Windows.zip"), e.g.:
 #   cd dist && ditto -c -k --sequesterRsrc --keepParent \
-#     "eBay Live Tools.app" "Live.Tools.v1.3.0.MacOS.zip"
+#     "Live Tools.app" "Live.Tools.v1.3.0.MacOS.zip"
 #
 # GitHub release title: "Live Tools v<APP_VERSION>" (tag stays "v<APP_VERSION>"),
 # e.g. tag "v1.3.0" with title "Live Tools v1.3.0".
+#
+# App name was renamed from "eBay Live Tools" to "Live Tools" starting with
+# the first release built after this change - the Application Support and
+# default Downloads folder names deliberately did NOT change (app_paths.py /
+# app.py's _default_downloads_dir()), so upgrading users keep their existing
+# settings/queue state and default downloads location.
 
 
 a = Analysis(
@@ -54,7 +60,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='eBay Live Tools',
+    name='Live Tools',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -74,11 +80,11 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='eBay Live Tools',
+    name='Live Tools',
 )
 app = BUNDLE(
     coll,
-    name='eBay Live Tools.app',
+    name='Live Tools.app',
     icon='/tmp/ebay-tools-icon/AppIcon.icns',
     bundle_identifier=None,
 )

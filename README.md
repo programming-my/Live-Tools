@@ -1,4 +1,4 @@
-# eBay Live Tools
+# Live Tools
 
 A desktop app for eBay Live sellers and editors: automatically downloads the
 replay once a live event ends, extracts pinned-auction overlays and short
@@ -10,7 +10,7 @@ and auction overlay you can capture in OBS.
 1. Go to the [Releases page](https://github.com/programming-my/Live-Tools/releases)
    and download the `.zip` under the latest release.
 2. Unzip it (double-click the `.zip` if your browser didn't already), and
-   drag **eBay Live Tools.app** wherever you'd like to keep it (e.g. your
+   drag **Live Tools.app** wherever you'd like to keep it (e.g. your
    Applications folder).
 3. Double-click to launch it. **This app isn't signed**, so the first time
    you open it, macOS will refuse and say it's "damaged" or "can't be
@@ -18,7 +18,7 @@ and auction overlay you can capture in OBS.
    - Right-click (or Control-click) the app → **Open** → **Open** again in
      the dialog that pops up, **or**
    - Go to **System Settings → Privacy & Security**, scroll down, and click
-     **"Open Anyway"** next to the message about eBay Live Tools.
+     **"Open Anyway"** next to the message about Live Tools.
 4. Your default browser opens automatically to the app's UI. The app keeps
    running in the background (there's no Dock window) - to quit it, right-
    click its Dock icon and choose **Quit**, or Cmd+Q while it's the active
@@ -32,8 +32,8 @@ installed version and a **Check for Updates** button.
 ## Download and install (Windows)
 
 1. Go to the [Releases page](https://github.com/programming-my/Live-Tools/releases)
-   and download the `eBay Live Tools (Windows).zip` under the latest release.
-2. Unzip it, and run **eBay Live Tools.exe** inside (keep the whole unzipped
+   and download the Windows `.zip` under the latest release.
+2. Unzip it, and run **Live Tools.exe** inside (keep the whole unzipped
    folder together - the `.exe` depends on the other files next to it).
 3. **This app isn't signed**, so Windows will show a blue "Windows protected
    your PC" SmartScreen warning the first time you run it. Click **More

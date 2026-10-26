@@ -60,7 +60,7 @@ jobs:
       - name: Build with PyInstaller
         shell: pwsh
         run: |
-          .venv\Scripts\pyinstaller --noconfirm --windowed --name "eBay Live Tools" `
+          .venv\Scripts\pyinstaller --noconfirm --windowed --name "Live Tools" `
             --add-data "static;static" `
             --add-data "overlay/template.html;overlay" `
             --add-binary "${{ steps.bins.outputs.ffmpeg }};." `
@@ -73,7 +73,7 @@ jobs:
 
       - name: Zip app
         shell: pwsh
-        run: Compress-Archive -Path "dist\eBay Live Tools\*" -DestinationPath "Live.Tools.${{ steps.version.outputs.version }}.Windows.zip"
+        run: Compress-Archive -Path "dist\Live Tools\*" -DestinationPath "Live.Tools.${{ steps.version.outputs.version }}.Windows.zip"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
