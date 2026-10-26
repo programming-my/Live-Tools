@@ -274,13 +274,13 @@ function addClipRow(prefillStart = "", prefillEnd = "") {
   const startInput = document.createElement("input");
   startInput.type = "text";
   startInput.className = "clip-start-input";
-  startInput.placeholder = "Start (mm:ss)";
+  startInput.placeholder = "Start (hh:mm:ss)";
   startInput.value = prefillStart;
 
   const endInput = document.createElement("input");
   endInput.type = "text";
   endInput.className = "clip-end-input";
-  endInput.placeholder = "End (mm:ss)";
+  endInput.placeholder = "End (hh:mm:ss)";
   endInput.value = prefillEnd;
 
   const removeBtn = document.createElement("button");
