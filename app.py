@@ -68,7 +68,7 @@ MAX_DOWNLOAD_RETRIES = 3  # plus the initial attempt = up to 4 tries total
 
 # Bump this on every release posted to GITHUB_REPO's Releases page - compared
 # against the latest release tag by /api/check-updates.
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 GITHUB_REPO = "programming-my/Live-Tools"
 
 
