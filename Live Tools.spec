@@ -34,6 +34,15 @@
 # default Downloads folder names deliberately did NOT change (app_paths.py /
 # app.py's _default_downloads_dir()), so upgrading users keep their existing
 # settings/queue state and default downloads location.
+#
+# yt-dlp staging: do NOT bundle the venv's own `.venv/bin/yt-dlp` - it's a
+# thin console-script wrapper whose shebang hardcodes this exact machine's
+# venv path, which won't exist on an end user's machine (shipped silently
+# broken this way through v1.3.0, unnoticed because it still "works" here).
+# Download yt-dlp's own self-contained standalone release build instead:
+#   curl -sL -o /tmp/ebay-tools-build/yt-dlp \
+#     https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
+#   chmod +x /tmp/ebay-tools-build/yt-dlp
 
 
 a = Analysis(

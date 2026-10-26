@@ -52,6 +52,15 @@ jobs:
         shell: pwsh
         run: Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
 
+      - name: Download standalone yt-dlp
+        shell: pwsh
+        run: |
+          # NOT .venv\Scripts\yt-dlp.exe - pip's generated launcher for that
+          # embeds a path back to this specific ephemeral runner's venv,
+          # which won't exist on an end user's machine. This is yt-dlp's own
+          # self-contained release build, bundled with its own interpreter.
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "yt-dlp.exe"
+
       - name: Generate icon and tray image
         shell: pwsh
         run: |
@@ -64,7 +73,7 @@ jobs:
             --add-data "static;static" `
             --add-data "overlay/template.html;overlay" `
             --add-binary "${{ steps.bins.outputs.ffmpeg }};." `
-            --add-binary ".venv\Scripts\yt-dlp.exe;." `
+            --add-binary "yt-dlp.exe;." `
             --add-binary "cloudflared.exe;." `
             --add-data "$env:LOCALAPPDATA\ms-playwright;ms-playwright" `
             --add-data "trayicon.png;." `
