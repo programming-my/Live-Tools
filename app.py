@@ -719,11 +719,48 @@ def _run_clip_export(event_url: str, clip_requests: list) -> None:
                 raise RuntimeError(
                     "This event hasn't ended yet (or has no replay available) - clips can only be made from a finished event."
                 )
-            source = m3u8_url
+
+            # Clipping straight from the remote manifest (ffmpeg seeking
+            # directly into the HLS source) turned out unreliable - some
+            # replay CDNs have no fast way to seek deep into a long archive,
+            # and stream-copying from one can silently produce a corrupt,
+            # near-empty clip instead of erroring out. Downloading once via
+            # the same reliable path the main Downloader uses, then clipping
+            # locally (fast and proven correct), costs more up front but
+            # actually works.
+            on_log("Downloading the full replay first, so clips can be extracted reliably...")
             event_date = fetch_event_start_date(event_url)
-            output_dir = os.path.join(DOWNLOADS_DIR, event_date) if event_date else DOWNLOADS_DIR
-            os.makedirs(output_dir, exist_ok=True)
-            on_log("Clipping directly from the live replay manifest - no download needed.")
+            date_prefix = f"{event_date} " if event_date else ""
+            filename = f"{date_prefix}ebay_replay_{int(time.time())}.mp4"
+            download_path = os.path.join(DOWNLOADS_DIR, filename)
+
+            def on_progress(percent: Optional[float], line: str) -> None:
+                on_log(line)
+
+            downloaded = False
+            for attempt in range(MAX_DOWNLOAD_RETRIES + 1):
+                if attempt > 0:
+                    on_log(f"Retrying download (attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES + 1})...")
+                try:
+                    downloaded = download_replay_with_progress(m3u8_url, download_path, on_progress)
+                except FileNotFoundError:
+                    raise RuntimeError("yt-dlp not found. Install it with 'pip install yt-dlp' inside the venv.")
+                if downloaded:
+                    break
+                _cleanup_partial_download(download_path)
+
+            if not downloaded:
+                raise RuntimeError(f"Could not download the replay after {MAX_DOWNLOAD_RETRIES + 1} attempts.")
+
+            on_log(f"Download complete: {filename}")
+            try:
+                with open(_sidecar_path(filename), "w") as f:
+                    json.dump({"event_url": event_url, "downloaded_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
+            except OSError as e:
+                on_log(f"Could not write metadata sidecar: {e}")
+
+            source = download_path
+            output_dir = DOWNLOADS_DIR
 
         any_failed = False
         for index, clip in enumerate(clip_requests):

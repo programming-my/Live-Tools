@@ -7,6 +7,7 @@ from typing import Callable, Optional
 import imageio_ffmpeg
 
 _BARE_NUMBER_PATTERN = re.compile(r"^\d+(\.\d+)?$")
+_REMOTE_SOURCE_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 
 
 def parse_timestamp_to_seconds(raw_value: str) -> float:
@@ -57,30 +58,35 @@ def extract_clip(
 ) -> bool:
     """
     Extracts [start_seconds, end_seconds) from `source` into output_path.
-    `source` can be a local file path or a remote URL (e.g. a .m3u8 replay
-    manifest) - ffmpeg reads both the same way, so no separate branching is
-    needed for "already downloaded" vs. "clip straight from the live stream".
+    `source` can be a local file path (already-downloaded replay) or a
+    remote URL (a .m3u8 replay manifest, clipped with no download needed).
 
-    Stream-copies (remuxes) rather than re-encoding - 10-50x faster since
-    there's no decode/encode pass, at the cost of only being able to cut on
-    the source's keyframe boundaries rather than the exact requested second
-    (typically within a few seconds, depending on the source's keyframe
-    interval). `-ss` before `-i` (input seek) is what actually skips to
-    that nearest keyframe; ffmpeg can't start a copied stream mid-frame.
+    Local files are stream-copied (remuxed) - 10-50x faster since there's
+    no decode/encode pass, at the cost of only cutting on the nearest
+    keyframe rather than the exact requested second. This is only safe for
+    local files: `-ss` input-seeking + stream-copy against this project's
+    remote fMP4/CMAF HLS sources (seen on real eBay Live replay manifests)
+    corrupts the H.264 bitstream while ffmpeg hunts for a copy-safe
+    keyframe (a flood of "Invalid NAL unit size" errors), producing a
+    near-empty, unplayable output file instead of erroring out cleanly - so
+    remote sources fall back to the slower but reliable re-encode path.
     """
     log = on_log or (lambda msg: None)
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     duration = max(0.1, end_seconds - start_seconds)
+    is_remote = bool(_REMOTE_SOURCE_PATTERN.match(source))
 
     cmd = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-ss", str(start_seconds),
         "-i", source,
         "-t", str(duration),
-        "-c", "copy",
-        "-movflags", "+faststart",
-        output_path,
     ]
+    if is_remote:
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-pix_fmt", "yuv420p"]
+    else:
+        cmd += ["-c", "copy"]
+    cmd += ["-movflags", "+faststart", output_path]
     log(f"Running: {' '.join(cmd)}")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
