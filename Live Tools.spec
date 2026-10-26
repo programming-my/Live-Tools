@@ -43,6 +43,19 @@
 #   curl -sL -o /tmp/ebay-tools-build/yt-dlp \
 #     https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
 #   chmod +x /tmp/ebay-tools-build/yt-dlp
+#
+# App icon: the master source is committed at branding/app_icon_master.png
+# (1024x1024) - the Windows workflow generates its .ico/tray PNG from this
+# same file directly. For the Mac .icns, build an iconset from it first
+# (icon.icns itself isn't committed/reused as-is since iconutil needs the
+# full size set):
+#   mkdir -p /tmp/ebay-tools-icon/AppIcon.iconset
+#   SRC=branding/app_icon_master.png
+#   for size in 16 32 128 256 512; do
+#     sips -z $size $size "$SRC" --out "/tmp/ebay-tools-icon/AppIcon.iconset/icon_${size}x${size}.png"
+#     sips -z $((size*2)) $((size*2)) "$SRC" --out "/tmp/ebay-tools-icon/AppIcon.iconset/icon_${size}x${size}@2x.png"
+#   done
+#   iconutil -c icns /tmp/ebay-tools-icon/AppIcon.iconset -o /tmp/ebay-tools-icon/AppIcon.icns
 
 
 a = Analysis(

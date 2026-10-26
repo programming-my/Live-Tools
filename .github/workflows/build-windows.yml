@@ -64,7 +64,7 @@ jobs:
       - name: Generate icon and tray image
         shell: pwsh
         run: |
-          .venv\Scripts\python -c "from PIL import Image; img = Image.open('static/favicon-32.png'); img.save('icon.ico'); img.save('trayicon.png')"
+          .venv\Scripts\python -c "from PIL import Image; img = Image.open('branding/app_icon_master.png'); img.save('icon.ico', sizes=[(16,16),(32,32),(48,48),(128,128),(256,256)]); img.resize((128,128)).save('trayicon.png')"
 
       - name: Build with PyInstaller
         shell: pwsh
