@@ -163,7 +163,9 @@
     <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
       Extracts short clips by timestamp from an event's replay. Reuses an already-downloaded
       file if you have one; otherwise clips directly from the live replay manifest - either
-      way, no full download of the whole event is needed just to grab a clip.
+      way, no full download of the whole event is needed just to grab a clip. Clips are cut
+      fast (no re-encoding), so the exact start/end may land a couple seconds off from what
+      you typed, snapping to the nearest keyframe in the source.
     </p>
 
     <div class="card">

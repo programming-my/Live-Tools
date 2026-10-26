@@ -72,7 +72,9 @@ downloaded a replay of, rendering directly from the event's own data instead
 Extracts short clips by timestamp from an event's replay. Reuses an
 already-downloaded file if you have one; otherwise it clips directly from
 the live replay manifest - either way, no full download of the whole event
-is needed just to grab a clip.
+is needed just to grab a clip. Clips are cut fast (no re-encoding), so the
+exact start/end may land a couple seconds off from what you typed, snapping
+to the nearest keyframe in the source.
 
 ### Chat and Auction Monitor
 A live, browser-source-friendly overlay for events that are currently live:

@@ -61,11 +61,12 @@ def extract_clip(
     manifest) - ffmpeg reads both the same way, so no separate branching is
     needed for "already downloaded" vs. "clip straight from the live stream".
 
-    Always re-encodes (frame-accurate cut at the exact requested timestamp)
-    rather than stream-copying (which can only cut on keyframe boundaries).
-    `-ss` is placed before `-i` for a fast input-seek - this is still
-    frame-accurate here because a decode/re-encode happens afterward; it
-    would NOT be frame-accurate if this were a stream-copy (-c copy).
+    Stream-copies (remuxes) rather than re-encoding - 10-50x faster since
+    there's no decode/encode pass, at the cost of only being able to cut on
+    the source's keyframe boundaries rather than the exact requested second
+    (typically within a few seconds, depending on the source's keyframe
+    interval). `-ss` before `-i` (input seek) is what actually skips to
+    that nearest keyframe; ffmpeg can't start a copied stream mid-frame.
     """
     log = on_log or (lambda msg: None)
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
@@ -76,10 +77,8 @@ def extract_clip(
         "-ss", str(start_seconds),
         "-i", source,
         "-t", str(duration),
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-c:a", "aac",
+        "-c", "copy",
         "-movflags", "+faststart",
-        "-pix_fmt", "yuv420p",
         output_path,
     ]
     log(f"Running: {' '.join(cmd)}")
