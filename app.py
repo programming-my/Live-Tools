@@ -1149,7 +1149,11 @@ def get_tunnel_url() -> dict:
     """Lazily starts (or reuses) a cloudflared tunnel to edge_app - see
     tunnel.py and desktop_launcher.py's second uvicorn server on
     tunnel.EDGE_PORT - so Talent View / OBS URL links work from anywhere,
-    not just this machine."""
+    not just this machine. Waits up to tunnel.py's default 30s for a result
+    (whether this request is the one starting it, or one already kicked off
+    by the live-event "is it ready yet" gate) before giving up with a clear
+    503 - never hangs indefinitely regardless of how long that startup
+    actually takes under the hood."""
     try:
         return {"url": tunnel.get_or_start_tunnel_url()}
     except RuntimeError as e:

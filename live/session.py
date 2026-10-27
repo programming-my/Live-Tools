@@ -62,7 +62,14 @@ class EventSession:
 
     async def _ensure_tunnel(self) -> None:
         try:
-            await asyncio.wait_for(asyncio.to_thread(tunnel.get_or_start_tunnel_url), timeout=self._TUNNEL_GATE_TIMEOUT)
+            # wait_timeout is passed through so tunnel.py's own wait (shared
+            # with any other concurrent caller, e.g. a direct button click)
+            # is what actually bounds this - the outer wait_for is just a
+            # safety net a few seconds past that, not the primary timeout.
+            await asyncio.wait_for(
+                asyncio.to_thread(tunnel.get_or_start_tunnel_url, wait_timeout=self._TUNNEL_GATE_TIMEOUT),
+                timeout=self._TUNNEL_GATE_TIMEOUT + 5,
+            )
         except asyncio.TimeoutError:
             self.log("Sharing tunnel is taking longer than usual - continuing without waiting further for it.")
         except Exception as e:

@@ -29,9 +29,18 @@ _URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 # is the real signal that the tunnel connection is actually registered.
 _REGISTERED_RE = re.compile(r"Registered tunnel connection")
 
-_lock = threading.Lock()
+# How long the actual cloudflared startup attempt itself gets to succeed,
+# regardless of how long any one caller of get_or_start_tunnel_url() is
+# willing to wait for a result - see that function's docstring for why
+# these two things used to be (wrongly) the same number.
+_STARTUP_TIMEOUT = 90.0
+
+_state_lock = threading.Lock()
 _process: Optional[subprocess.Popen] = None
 _tunnel_url: Optional[str] = None
+_tunnel_error: Optional[str] = None
+_start_thread: Optional[threading.Thread] = None
+_start_done = threading.Event()
 
 
 def _pump_lines_into_queue(stream, line_queue: "queue.Queue[str]") -> None:
@@ -93,20 +102,20 @@ def _wait_until_reachable(url: str, timeout: float) -> bool:
     return False
 
 
-def get_or_start_tunnel_url(timeout: float = 90.0) -> str:
-    """Starts a cloudflared quick tunnel to the edge server (see app.py's
-    edge_app / desktop_launcher.py's EDGE_PORT server) on first call, and
-    returns its public https://*.trycloudflare.com URL - cached and reused
-    for every call after the first, for the lifetime of this process."""
-    global _process, _tunnel_url
-    with _lock:
-        if _tunnel_url:
-            return _tunnel_url
+def _run_tunnel_startup() -> None:
+    """Runs in its own always-background thread, entirely independent of
+    whichever caller happened to trigger it - see get_or_start_tunnel_url's
+    docstring. Writes the result to _tunnel_url/_tunnel_error and signals
+    _start_done exactly once, however long it actually takes (up to
+    _STARTUP_TIMEOUT), regardless of anyone's patience."""
+    global _process, _tunnel_url, _tunnel_error
+    try:
         if not CLOUDFLARED_BIN:
-            raise RuntimeError(
+            _tunnel_error = (
                 "cloudflared was not found. Install it (e.g. 'brew install cloudflared') "
                 "to use shareable Talent View / OBS links."
             )
+            return
 
         _process = subprocess.Popen(
             [CLOUDFLARED_BIN, "tunnel", "--protocol", "http2", "--url", f"http://127.0.0.1:{EDGE_PORT}"],
@@ -124,7 +133,7 @@ def get_or_start_tunnel_url(timeout: float = 90.0) -> str:
         reader.start()
 
         candidate_url: Optional[str] = None
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + _STARTUP_TIMEOUT
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
             try:
@@ -139,13 +148,51 @@ def get_or_start_tunnel_url(timeout: float = 90.0) -> str:
                 remaining = deadline - time.monotonic()
                 if _wait_until_reachable(candidate_url, timeout=max(remaining, 10.0)):
                     _tunnel_url = candidate_url
-                    return _tunnel_url
+                    return
                 break
             if _process.poll() is not None:
                 break
 
         stop_tunnel()
-        raise RuntimeError("Timed out waiting for the tunnel to start.")
+        _tunnel_error = "Timed out waiting for the tunnel to start."
+    finally:
+        _start_done.set()
+
+
+def get_or_start_tunnel_url(wait_timeout: float = 30.0) -> str:
+    """Returns the cached tunnel URL if one's already up. If a startup
+    attempt is already running (triggered by a concurrent caller), waits up
+    to wait_timeout for it to finish rather than starting a second
+    cloudflared process - and, critically, rather than blocking on a lock
+    held for however long THAT attempt takes.
+
+    This used to hold a single lock for the entire (up to 90s) startup
+    process, so a slow start left every other caller stuck waiting for
+    however long was left of it - including a direct button click well
+    after "live" already showed (live/session.py's own gate gives up
+    waiting after 30s and lets "live" show regardless, but the startup
+    attempt it kicked off keeps running in the background) - which looked
+    like the button being stuck on "Starting tunnel..." forever. Now every
+    caller - the gate or a button click - waits only as long as it
+    personally chooses to, on a shared result any of them may have kicked
+    off, instead of waiting on each other.
+    """
+    with _state_lock:
+        if _tunnel_url:
+            return _tunnel_url
+        global _start_thread
+        if _start_thread is None or not _start_thread.is_alive():
+            _start_done.clear()
+            _start_thread = threading.Thread(target=_run_tunnel_startup, daemon=True)
+            _start_thread.start()
+
+    if not _start_done.wait(timeout=wait_timeout):
+        raise RuntimeError("The sharing tunnel is still starting - try again in a few seconds.")
+
+    with _state_lock:
+        if _tunnel_url:
+            return _tunnel_url
+        raise RuntimeError(_tunnel_error or "Timed out waiting for the tunnel to start.")
 
 
 def stop_tunnel() -> None:
