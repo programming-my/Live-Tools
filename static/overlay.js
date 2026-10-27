@@ -73,7 +73,13 @@
       baseRemaining = data.remaining_seconds;
       baseAt = performance.now();
       updateCountdown();
-      bidPillText.textContent = "Bid now";
+      // The top price is "where the bidding is at" (current winning bid);
+      // the pill suggests the *next* bid, which eBay computes as
+      // recommended_bid - always higher than price, to actually encourage a
+      // bid rather than repeat the number already shown above. Falls back
+      // to price itself before the first bid (no recommendation exists yet).
+      const suggestedBid = data.recommended_bid ?? data.price;
+      bidPillText.textContent = `Bid ${formatMoney(suggestedBid, data.currency)}`;
       bidPillFill.classList.remove("muted");
       bidPillChevron.classList.remove("hidden");
     } else if (data.phase === "ended") {
