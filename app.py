@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import clips
+import hls_segments
 import tunnel
 from app_paths import app_support_dir
 from download_queue import QueueState
@@ -700,6 +701,14 @@ def _try_start_clip_export(event_url: str, clip_requests: list) -> bool:
         return True
 
 
+def _clip_output_filename(index: int, clip: dict) -> str:
+    return (
+        f"clip_{index + 1}_"
+        f"{clips.seconds_to_timecode(clip['start_seconds'])}_to_"
+        f"{clips.seconds_to_timecode(clip['end_seconds'])}.mp4"
+    )
+
+
 def _run_clip_export(event_url: str, clip_requests: list) -> None:
     def on_log(message: str) -> None:
         clip_export_state.log(message)
@@ -720,15 +729,34 @@ def _run_clip_export(event_url: str, clip_requests: list) -> None:
                     "This event hasn't ended yet (or has no replay available) - clips can only be made from a finished event."
                 )
 
-            # Clipping straight from the remote manifest (ffmpeg seeking
-            # directly into the HLS source) turned out unreliable - some
-            # replay CDNs have no fast way to seek deep into a long archive,
-            # and stream-copying from one can silently produce a corrupt,
-            # near-empty clip instead of erroring out. Downloading once via
-            # the same reliable path the main Downloader uses, then clipping
-            # locally (fast and proven correct), costs more up front but
-            # actually works.
-            on_log("Downloading the full replay first, so clips can be extracted reliably...")
+            # Try fetching only the segments covering each requested range
+            # first - ffmpeg seeking directly into the remote manifest turned
+            # out unreliable on real replay CDNs (see hls_segments.py), but a
+            # full download of a multi-hour event just to grab one short clip
+            # can take tens of minutes. Falls back to a full download only if
+            # the fast path isn't usable for this particular event (e.g. an
+            # unparseable playlist, or the range spanning a discontinuity).
+            on_log("Fetching just the segments covering the requested clip(s)...")
+            fast_path_results = []
+            fast_path_ok = True
+            for index, clip in enumerate(clip_requests):
+                output_path = os.path.join(DOWNLOADS_DIR, _clip_output_filename(index, clip))
+                on_log(f"Extracting clip {index + 1}/{len(clip_requests)} ({clip['start']} to {clip['end']})...")
+                success = hls_segments.extract_clip_via_segments(
+                    m3u8_url, output_path, clip["start_seconds"], clip["end_seconds"], on_log=on_log,
+                )
+                fast_path_results.append((index, output_path))
+                if not success:
+                    fast_path_ok = False
+                    break
+
+            if fast_path_ok:
+                for index, output_path in fast_path_results:
+                    clip_export_state.set_clip_result(index, "DONE", os.path.relpath(output_path, DOWNLOADS_DIR))
+                clip_export_state.set_done()
+                return
+
+            on_log("Targeted segment fetch didn't work for this event - falling back to a full download...")
             event_date = fetch_event_start_date(event_url)
             date_prefix = f"{event_date} " if event_date else ""
             filename = f"{date_prefix}ebay_replay_{int(time.time())}.mp4"
@@ -764,12 +792,7 @@ def _run_clip_export(event_url: str, clip_requests: list) -> None:
 
         any_failed = False
         for index, clip in enumerate(clip_requests):
-            output_filename = (
-                f"clip_{index + 1}_"
-                f"{clips.seconds_to_timecode(clip['start_seconds'])}_to_"
-                f"{clips.seconds_to_timecode(clip['end_seconds'])}.mp4"
-            )
-            output_path = os.path.join(output_dir, output_filename)
+            output_path = os.path.join(output_dir, _clip_output_filename(index, clip))
             on_log(f"Extracting clip {index + 1}/{len(clip_requests)} ({clip['start']} to {clip['end']})...")
             success = clips.extract_clip(
                 source, output_path, clip["start_seconds"], clip["end_seconds"], on_log=on_log,

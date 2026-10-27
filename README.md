@@ -70,13 +70,15 @@ downloaded a replay of, rendering directly from the event's own data instead
 
 ### Download Clip
 Extracts short clips by timestamp from an event's replay. Reuses an
-already-downloaded file if you have one; otherwise it downloads the full
-replay first (same as a regular download - seeking directly into a remote
-replay stream turned out unreliable for some events, occasionally producing
-a corrupt, near-empty clip instead of an error) and clips from that. Once a
-local file is available, clips are cut fast (no re-encoding), so the exact
-start/end may land a couple seconds off from what you typed, snapping to
-the nearest keyframe in the source.
+already-downloaded file if you have one; otherwise it fetches just the
+handful of segments covering the requested range directly from the replay
+manifest (seconds, not a full download - seeking ffmpeg directly into a
+remote replay stream turned out unreliable on some events, occasionally
+producing a corrupt, near-empty clip instead of an error) and clips from
+that. Falls back to downloading the full replay only if the targeted fetch
+isn't possible for a given event. Clips are cut fast (no re-encoding), so
+the exact start/end may land a couple seconds off from what you typed,
+snapping to the nearest keyframe in the source.
 
 ### Chat and Auction Monitor
 A live, browser-source-friendly overlay for events that are currently live:

@@ -162,10 +162,11 @@
     <h2>Download Clip</h2>
     <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
       Extracts short clips by timestamp from an event's replay. Reuses an already-downloaded
-      file if you have one; otherwise it downloads the full replay first (same as a regular
-      download) and clips from that. Once a local file is available, clips are cut fast (no
-      re-encoding), so the exact start/end may land a couple seconds off from what you typed,
-      snapping to the nearest keyframe in the source.
+      file if you have one; otherwise it fetches just the segments covering the requested
+      range directly from the replay manifest (seconds, not a full download), falling back
+      to a full download only if that isn't possible for a given event. Clips are cut fast
+      (no re-encoding), so the exact start/end may land a couple seconds off from what you
+      typed, snapping to the nearest keyframe in the source.
     </p>
 
     <div class="card">
