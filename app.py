@@ -1179,3 +1179,27 @@ def _start_edge_server() -> None:
         target=lambda: uvicorn.run(edge_app, host="127.0.0.1", port=tunnel.EDGE_PORT, log_level="warning"),
         daemon=True,
     ).start()
+
+
+@app.on_event("startup")
+def _start_tunnel_at_launch() -> None:
+    """Starts the sharing tunnel immediately at app launch rather than
+    waiting for the first "Start watching" click, so cloudflared has the
+    maximum possible head start - by the time anyone actually wants a
+    Talent View / OBS URL link, it's usually already connected, instead of
+    making that first click wait on it. live/session.py's own "is it ready
+    yet" gate (EventSession._ensure_tunnel) still runs on every watched
+    event too, as a correctness safety net for the rare case someone starts
+    watching within seconds of launching the app - it'll just resolve
+    near-instantly against the cached result in the common case now.
+
+    Note this means the tunnel - and the public link it creates - stays up
+    for as long as the app is running, not just while an event is being
+    watched; see tunnel.py / README's note on treating that link as
+    sensitive while it's live."""
+    def _start() -> None:
+        try:
+            tunnel.get_or_start_tunnel_url()
+        except Exception:
+            pass  # a real "Start watching"/button click will retry and surface any failure then
+    threading.Thread(target=_start, daemon=True).start()

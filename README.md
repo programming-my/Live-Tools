@@ -90,13 +90,15 @@ gives you:
 - **Copy OBS URL** - the same page with controls hidden, for a clean
   browser-source capture in OBS.
 
-Both links work from anywhere, not just this machine - the first click
-starts a [Cloudflare quick tunnel](https://github.com/cloudflare/cloudflared)
-automatically (a few seconds' delay), reused for every link after that. Only
-the overlay pages themselves are ever reachable through it - the downloader,
-queue, and settings stay local-only no matter what. There's still no login
-on the overlay pages, though, so treat the link as sensitive while it's live,
-and it stops working once the app quits (a fresh link is generated next time).
+Both links work from anywhere, not just this machine - a
+[Cloudflare quick tunnel](https://github.com/cloudflare/cloudflared) starts
+automatically as soon as the app launches, so it's usually already connected
+by the time you click either button. Only the overlay pages themselves are
+ever reachable through it - the downloader, queue, and settings stay
+local-only no matter what. There's still no login on the overlay pages,
+though, so treat the link as sensitive **for as long as the app is
+running** (not just while an event is being watched), and it stops working
+once the app quits (a fresh link is generated next time).
 
 Card visibility is pin-driven, not timer-based: it appears the moment an
 item is pinned ("starting soon"), moves through live bidding once the
