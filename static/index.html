@@ -211,11 +211,7 @@
     </div>
 
     <h2>Chat and Auction Monitor</h2>
-    <div class="status-row" style="margin: -4px 0 10px;">
-      <span>Sharing tunnel:</span>
-      <span id="tunnelStatusBadge" class="badge badge-idle hidden">IDLE</span>
-    </div>
-    <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
+    <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 10px;">
       Extracts chat and auction data in real time while the event is live. Talent View is
       optimized for vertical monitors to show chat and auctions. Copy OBS URL to display the
       full eBay Live UI as a browser source. Both links work from anywhere, not just this
@@ -223,6 +219,9 @@
       already connected) - treat them as sensitive for as long as the app is running, since
       anyone with the link can view them, no login required.
     </p>
+    <div class="status-row" style="margin: -2px 0 16px;">
+      <span id="tunnelStatusBadge" class="badge badge-idle hidden">IDLE</span>
+    </div>
 
     <div class="card">
       <label for="liveEventUrl">eBay Live event URL</label>

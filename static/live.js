@@ -34,6 +34,11 @@ async function refreshTunnelStatus() {
   const data = await res.json();
   tunnelStatusBadge.className = "badge " + (TUNNEL_STATUS_BADGE_CLASSES[data.status] || "badge-idle");
   tunnelStatusBadge.textContent = TUNNEL_STATUS_LABELS[data.status] || data.status;
+  // Starting to watch an event already waits on the tunnel internally
+  // before showing "live" (see live/session.py's gate) - greying the
+  // button out until then makes that wait visible up front instead of
+  // looking like nothing happened after clicking "Start watching".
+  liveStartBtn.disabled = data.status !== "connected";
 }
 
 async function startLiveEvent() {
