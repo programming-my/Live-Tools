@@ -185,7 +185,9 @@ def check_event_status(url: str) -> tuple[str, Optional[str], Optional[str]]:
 def _probe_stream_duration_seconds(url: str) -> Optional[float]:
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     try:
-        result = subprocess.run([ffmpeg, "-i", url], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [ffmpeg, "-tls_verify", "0", "-i", url], capture_output=True, text=True, timeout=30,
+        )
     except subprocess.TimeoutExpired:
         return None
     match = DURATION_PATTERN.search(result.stderr)
@@ -257,6 +259,7 @@ def _download_with_ffmpeg(
 
     cmd = [
         ffmpeg, "-y",
+        "-tls_verify", "0",
         "-i", m3u8_url,
         "-c", "copy",
         "-loglevel", "error",
@@ -317,6 +320,7 @@ def download_replay_with_progress(
         YT_DLP_BIN,
         "--hls-use-mpegts",
         "--concurrent-fragments", "8",
+        "--no-check-certificate",
         "--newline",
         "-o", output_path,
         m3u8_url,

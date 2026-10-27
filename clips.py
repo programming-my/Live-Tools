@@ -79,9 +79,10 @@ def extract_clip(
     cmd = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-ss", str(start_seconds),
-        "-i", source,
-        "-t", str(duration),
     ]
+    if is_remote:
+        cmd += ["-tls_verify", "0"]
+    cmd += ["-i", source, "-t", str(duration)]
     if is_remote:
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-pix_fmt", "yuv420p"]
     else:
