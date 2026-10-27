@@ -46,6 +46,9 @@ const clipAddRowBtn = document.getElementById("clipAddRowBtn");
 const clipExportBtn = document.getElementById("clipExportBtn");
 const clipExportStatusBadge = document.getElementById("clipExportStatusBadge");
 const clipExportClearBtn = document.getElementById("clipExportClearBtn");
+const clipExportProgressRow = document.getElementById("clipExportProgressRow");
+const clipExportProgressFill = document.getElementById("clipExportProgressFill");
+const clipExportProgressLabel = document.getElementById("clipExportProgressLabel");
 const clipResultsListEl = document.getElementById("clipResultsList");
 const clipExportLogEl = document.getElementById("clipExportLog");
 
@@ -580,6 +583,15 @@ function renderClipExport(exportState) {
     clipExportStatusBadge.className = "badge " + (BADGE_CLASSES[exportState.status] || "badge-idle");
   } else {
     clipExportStatusBadge.classList.add("hidden");
+  }
+
+  if (exportState.status === "RUNNING" && exportState.progress !== null && exportState.progress !== undefined) {
+    clipExportProgressRow.classList.remove("hidden");
+    const pct = exportState.progress;
+    clipExportProgressFill.style.width = pct + "%";
+    clipExportProgressLabel.textContent = pct.toFixed(1) + "%";
+  } else {
+    clipExportProgressRow.classList.add("hidden");
   }
 
   renderClipResults(exportState.clips);

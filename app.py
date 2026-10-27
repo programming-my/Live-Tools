@@ -380,12 +380,14 @@ class ClipExportState:
         self.status: str = "IDLE"
         self.logs: deque = deque(maxlen=500)
         self.clips: list = []
+        self.progress: Optional[float] = None
 
     def reset(self, event_url: str, clip_requests: list) -> None:
         with self.lock:
             self._reset_locked()
             self.event_url = event_url
             self.status = "RUNNING"
+            self.progress = 0
             self.clips = [
                 {"start": c["start"], "end": c["end"], "output_filename": None, "status": "PENDING"}
                 for c in clip_requests
@@ -410,9 +412,14 @@ class ClipExportState:
             self.clips[index]["status"] = status
             self.clips[index]["output_filename"] = output_filename
 
+    def set_progress(self, percent: float) -> None:
+        with self.lock:
+            self.progress = percent
+
     def set_done(self) -> None:
         with self.lock:
             self.status = "DONE"
+            self.progress = 100
 
     def set_error(self) -> None:
         with self.lock:
@@ -425,6 +432,7 @@ class ClipExportState:
                 "status": self.status,
                 "logs": list(self.logs),
                 "clips": [dict(c) for c in self.clips],
+                "progress": self.progress,
                 "running": self.is_running(),
             }
 
@@ -739,11 +747,17 @@ def _run_clip_export(event_url: str, clip_requests: list) -> None:
             on_log("Fetching just the segments covering the requested clip(s)...")
             fast_path_results = []
             fast_path_ok = True
+            total_clips = len(clip_requests)
             for index, clip in enumerate(clip_requests):
                 output_path = os.path.join(DOWNLOADS_DIR, _clip_output_filename(index, clip))
-                on_log(f"Extracting clip {index + 1}/{len(clip_requests)} ({clip['start']} to {clip['end']})...")
+                on_log(f"Extracting clip {index + 1}/{total_clips} ({clip['start']} to {clip['end']})...")
+
+                def on_segment_progress(fetched: int, total: int) -> None:
+                    clip_export_state.set_progress((index + fetched / total) / total_clips * 100)
+
                 success = hls_segments.extract_clip_via_segments(
-                    m3u8_url, output_path, clip["start_seconds"], clip["end_seconds"], on_log=on_log,
+                    m3u8_url, output_path, clip["start_seconds"], clip["end_seconds"],
+                    on_log=on_log, on_progress=on_segment_progress,
                 )
                 fast_path_results.append((index, output_path))
                 if not success:
@@ -764,6 +778,8 @@ def _run_clip_export(event_url: str, clip_requests: list) -> None:
 
             def on_progress(percent: Optional[float], line: str) -> None:
                 on_log(line)
+                if percent is not None:
+                    clip_export_state.set_progress(percent)
 
             downloaded = False
             for attempt in range(MAX_DOWNLOAD_RETRIES + 1):
@@ -797,6 +813,7 @@ def _run_clip_export(event_url: str, clip_requests: list) -> None:
             success = clips.extract_clip(
                 source, output_path, clip["start_seconds"], clip["end_seconds"], on_log=on_log,
             )
+            clip_export_state.set_progress((index + 1) / len(clip_requests) * 100)
             if success:
                 clip_export_state.set_clip_result(index, "DONE", os.path.relpath(output_path, DOWNLOADS_DIR))
             else:

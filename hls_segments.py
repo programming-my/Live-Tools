@@ -102,6 +102,7 @@ def _parse_segments(playlist_url: str, text: str) -> List[Segment]:
 def extract_clip_via_segments(
     manifest_url: str, output_path: str, start_seconds: float, end_seconds: float,
     on_log: Optional[Callable[[str], None]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> bool:
     """
     Fetches only the HLS segments covering [start_seconds, end_seconds) from
@@ -137,6 +138,13 @@ def extract_clip_via_segments(
         log("Requested range spans a stream discontinuity - falling back to a full download.")
         return False
 
+    total_fetches = len(selected) + 1  # +1 for the init segment
+    completed_fetches = 0
+
+    def report_progress() -> None:
+        if on_progress is not None:
+            on_progress(completed_fetches, total_fetches)
+
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
@@ -144,11 +152,15 @@ def extract_clip_via_segments(
             init_response = requests.get(selected[0].init_uri, headers=HEADERS, verify=False, timeout=15)
             init_response.raise_for_status()
             tmp_file.write(init_response.content)
+            completed_fetches += 1
+            report_progress()
 
             for segment in selected:
                 segment_response = requests.get(segment.url, headers=HEADERS, verify=False, timeout=15)
                 segment_response.raise_for_status()
                 tmp_file.write(segment_response.content)
+                completed_fetches += 1
+                report_progress()
 
         log(f"Fetched {len(selected)} segment(s) covering the requested range.")
         offset = selected[0].start
