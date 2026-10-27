@@ -38,7 +38,20 @@ html, body {
 
 /* Vertical 3:4 layout: chat fills the space above (all the way to the top
    - no viewer-count pill reserving room anymore), auction card is pinned
-   to the bottom and stretches full width. */
+   to the bottom and stretches full width.
+
+   Auction card sizing below uses vh (viewport height), not vw, for every
+   property that affects its height - font sizes, vertical padding/margins,
+   border thickness, the button row's fixed height, the bid-fill icon. vw
+   was the original unit throughout, which looks right at this design's
+   9:16 reference aspect ratio (where 1vw and 1vh happen to be close), but
+   blows the whole card up when the window is wide at a similar height
+   instead - vh keeps it anchored to height regardless of width. Purely
+   horizontal spacing (left/right padding, gaps between side-by-side
+   buttons) stays in vw, which is exactly what lets the pill's *width*
+   stretch to fill a wide screen. (vw values here are the originals * 0.5625
+   - the 9:16 aspect ratio's vw:vh ratio - so the 9:16 case renders
+   identically to before.) */
 .content-stack {
   position: absolute;
   top: 3%;
@@ -47,7 +60,7 @@ html, body {
   bottom: 3%;
   display: flex;
   flex-direction: column;
-  gap: 2.5vw;
+  gap: 1.41vh;
 }
 
 /* Auction card - ported from the offline overlay's template.html */
@@ -55,36 +68,36 @@ html, body {
   flex-shrink: 0;
   width: 100%;
   background: rgba(18, 18, 18, 0.94);
-  border-radius: 3vw;
-  padding: 3vw 3.5vw;
+  border-radius: 1.69vh;
+  padding: 1.69vh 3.5vw;
   color: #fff;
 }
 .auction-title {
   font-weight: 700;
-  font-size: 3vw;
-  margin-bottom: 2vw;
+  font-size: 1.69vh;
+  margin-bottom: 1.13vh;
   line-height: 1.3;
 }
 .auction-price {
-  font-size: 5.4vw;
+  font-size: 3.04vh;
   font-weight: 800;
-  margin-bottom: 1.6vw;
+  margin-bottom: 0.9vh;
 }
 .auction-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 3vw;
+  margin-bottom: 1.69vh;
 }
 .auction-winner {
-  font-size: 5.6vw; /* 2x - who's winning should read clearly at a glance */
+  font-size: 3.15vh; /* 2x - who's winning should read clearly at a glance */
   color: #eee;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .auction-timer {
-  font-size: 5.6vw;
+  font-size: 3.15vh;
   color: #ff4d4f;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -95,23 +108,23 @@ html, body {
   display: flex;
   align-items: stretch;
   gap: 2.4vw;
-  height: 8.6vw;
+  height: 4.84vh;
 }
 .btn-max-bid {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 0.3vw solid #fff;
+  border: 0.17vh solid #fff;
   border-radius: 999px;
   padding: 0 4.5vw;
-  font-size: 2.8vw;
+  font-size: 1.58vh;
   font-weight: 600;
   color: #fff;
 }
 .btn-bid {
   flex: 1;
   position: relative;
-  border: 0.3vw solid #fff;
+  border: 0.17vh solid #fff;
   border-radius: 999px;
 }
 .btn-bid-fill {
@@ -127,7 +140,7 @@ html, body {
   background: #4ce160;
   border-radius: 999px;
   padding: 0 4.5vw;
-  font-size: 2.8vw;
+  font-size: 1.58vh;
   font-weight: 700;
   color: #0c310d;
   transition: background-color 0.2s ease, color 0.2s ease;
@@ -141,7 +154,7 @@ html, body {
   color: #fff;
 }
 .btn-bid-fill svg {
-  height: 2.4vw;
+  height: 1.35vh;
   width: auto;
   flex-shrink: 0;
 }
