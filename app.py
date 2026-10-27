@@ -1160,6 +1160,14 @@ def get_tunnel_url() -> dict:
         raise HTTPException(status_code=503, detail=str(e))
 
 
+@app.get("/api/tunnel-status")
+def get_tunnel_status() -> dict:
+    """Non-blocking - for a UI indicator showing whether the tunnel
+    (started at app launch - see _start_tunnel_at_launch) is still
+    connecting or already up, without making the caller wait either way."""
+    return tunnel.get_status()
+
+
 # edge_app exposes only the overlay pages, their static assets, and the
 # websocket - never the downloader, queue, or settings - since it's the only
 # thing ever reachable through the tunnel above, which has no authentication.

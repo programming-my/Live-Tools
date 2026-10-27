@@ -1,6 +1,7 @@
 const liveEventUrlInput = document.getElementById("liveEventUrl");
 const liveStartBtn = document.getElementById("liveStartBtn");
 const liveEventsListEl = document.getElementById("liveEventsList");
+const tunnelStatusBadge = document.getElementById("tunnelStatusBadge");
 
 const LIVE_STATUS_BADGE_CLASSES = {
   starting: "badge-waiting",
@@ -10,6 +11,30 @@ const LIVE_STATUS_BADGE_CLASSES = {
   error: "badge-error",
   stopped: "badge-idle",
 };
+
+const TUNNEL_STATUS_BADGE_CLASSES = {
+  idle: "badge-idle",
+  starting: "badge-waiting",
+  connected: "badge-live",
+  error: "badge-error",
+};
+const TUNNEL_STATUS_LABELS = {
+  idle: "Idle",
+  starting: "Starting tunnel",
+  connected: "Tunnel connected",
+  error: "Tunnel unavailable",
+};
+
+// The tunnel is a single app-wide resource (started at launch - see
+// app.py's _start_tunnel_at_launch), not tied to any one watched event, so
+// it gets its own small indicator and polling loop rather than living
+// inside renderLiveEvents/refreshLiveEvents.
+async function refreshTunnelStatus() {
+  const res = await fetch("/api/tunnel-status");
+  const data = await res.json();
+  tunnelStatusBadge.className = "badge " + (TUNNEL_STATUS_BADGE_CLASSES[data.status] || "badge-idle");
+  tunnelStatusBadge.textContent = TUNNEL_STATUS_LABELS[data.status] || data.status;
+}
 
 async function startLiveEvent() {
   const url = liveEventUrlInput.value.trim();
@@ -157,3 +182,6 @@ async function refreshLiveEvents() {
 liveStartBtn.addEventListener("click", startLiveEvent);
 setInterval(refreshLiveEvents, 2000);
 refreshLiveEvents();
+
+setInterval(refreshTunnelStatus, 2000);
+refreshTunnelStatus();

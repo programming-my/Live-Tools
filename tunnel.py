@@ -195,6 +195,28 @@ def get_or_start_tunnel_url(wait_timeout: float = 30.0) -> str:
         raise RuntimeError(_tunnel_error or "Timed out waiting for the tunnel to start.")
 
 
+def get_status() -> dict:
+    """Non-blocking status check for a UI indicator - unlike
+    get_or_start_tunnel_url(), never waits, and doesn't start anything
+    (there's nothing to lazily start now that app.py kicks this off at
+    launch - see _start_tunnel_at_launch). One of:
+    - {"status": "idle"} - hasn't been started yet (shouldn't normally be
+      seen once the app's finished launching).
+    - {"status": "starting"} - in progress.
+    - {"status": "connected", "url": "..."} - ready to use.
+    - {"status": "error", "detail": "..."} - the last attempt failed; a
+      real call to get_or_start_tunnel_url() will retry.
+    """
+    with _state_lock:
+        if _tunnel_url:
+            return {"status": "connected", "url": _tunnel_url}
+        if _start_thread is not None and _start_thread.is_alive():
+            return {"status": "starting"}
+        if _tunnel_error:
+            return {"status": "error", "detail": _tunnel_error}
+        return {"status": "idle"}
+
+
 def stop_tunnel() -> None:
     global _process, _tunnel_url
     if _process is not None:
