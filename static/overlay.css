@@ -172,26 +172,34 @@ html, body {
   border-radius: 2vw;
   overflow: hidden;
 }
+/* Height-affecting values below (font-size, vertical padding/gap,
+   border-radius) use min(Xvw, Yvh) rather than plain vw - grows with width
+   same as before up to a point, but the vh side caps it at 1.5x this
+   design's 9:16-reference size (Yvh = Xvw's original number * 0.84375,
+   i.e. * 0.5625 for the 9:16-equivalent vh value, * 1.5 for the cap) so
+   this bar doesn't keep ballooning past that on a very wide screen.
+   Horizontal-only spacing (button padding-left/right) stays plain vw,
+   letting the buttons keep stretching wider as before. */
 .chat-controls {
   display: flex;
   align-items: center;
-  gap: 0.8vw;
-  padding: 1vw 1.2vw;
+  gap: min(0.8vw, 0.675vh);
+  padding: min(1vw, 0.844vh) 1.2vw;
   background: rgba(0, 0, 0, 0.35);
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 .chat-controls-label {
   color: #9aa1ac;
-  font-size: 1.3vw;
+  font-size: min(1.3vw, 1.097vh);
   margin-right: auto;
 }
 .chat-controls button {
   background: rgba(255, 255, 255, 0.12);
   color: #fff;
   border: none;
-  border-radius: 0.6vw;
-  padding: 0.6vw 1vw;
-  font-size: 1.4vw;
+  border-radius: min(0.6vw, 0.506vh);
+  padding: min(0.6vw, 0.506vh) 1vw;
+  font-size: min(1.4vw, 1.181vh);
   font-weight: 700;
   cursor: pointer;
 }
@@ -201,7 +209,7 @@ html, body {
    .chat-controls' hide-under-?hideControls=1 handling automatically since
    it's a child of that row rather than a separate element. */
 .fullscreen-btn {
-  font-size: 1.6vw;
+  font-size: min(1.6vw, 1.35vh);
 }
 
 .chat-messages {
