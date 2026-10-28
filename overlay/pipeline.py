@@ -62,28 +62,59 @@ def _clip_bounds_for_listing(
     return video_start, video_end
 
 
-def _fetch_and_calibrate(
-    event_url: str, source_video_path: str, log: Callable[[str], None], progress: Callable[[float], None],
-    time_offset_override: Optional[float], time_scale_override: Optional[float],
+def fetch_history_and_timeline(
+    event_url: str,
+    on_log: Optional[Callable[[str], None]] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
-):
+) -> tuple:
     """
-    Shared first half of both pipelines: fetch history, build the timeline,
-    probe the source video, and compute the time_offset/time_scale mapping
-    from video-seconds to real-event-seconds. Returns
-    (timeline, video_info, time_offset, time_scale) or None if the video's
-    duration couldn't be determined (nothing usable to render against).
+    Does just the (potentially many-minutes-long, on a troubled event) fetch
+    + timeline-build step, independent of any particular item's export -
+    callers exporting several different items from the same event should
+    call this once and reuse the returned (history, timeline) for each one
+    (see build_chroma_key_overlay_video/build_standalone_chroma_key_overlay_video's
+    prefetched parameter) rather than re-fetching per item.
+
+    on_progress, if given, covers 0.0-1.0 of just this step.
     """
+    log = on_log or (lambda m: None)
+    progress = on_progress or (lambda frac: None)
+
     log("Fetching auction/bid history...")
-    history = fetch_full_history(
-        event_url, on_log=log, should_stop=should_stop,
-        on_progress=lambda frac: progress(frac * FETCH_DONE_PCT),
-    )
-    progress(FETCH_DONE_PCT)
+    history = fetch_full_history(event_url, on_log=log, should_stop=should_stop, on_progress=progress)
+    progress(1.0)
 
     log("Reconstructing timeline...")
     timeline = build_timeline(history, on_log=log)
     log(f"Timeline ready: {len(timeline.auctions)} auction segments.")
+    return history, timeline
+
+
+def _fetch_and_calibrate(
+    event_url: str, source_video_path: str, log: Callable[[str], None], progress: Callable[[float], None],
+    time_offset_override: Optional[float], time_scale_override: Optional[float],
+    should_stop: Optional[Callable[[], bool]] = None,
+    prefetched: Optional[tuple] = None,
+):
+    """
+    Shared first half of both pipelines: fetch history (unless already
+    provided via `prefetched` - see fetch_history_and_timeline), build the
+    timeline, probe the source video, and compute the time_offset/time_scale
+    mapping from video-seconds to real-event-seconds. Returns (timeline,
+    video_info, time_offset, time_scale) or None if the video's duration
+    couldn't be determined (nothing usable to render against).
+    """
+    if prefetched is not None:
+        history, timeline = prefetched
+        log(f"Reusing already-fetched auction/bid history ({len(timeline.auctions)} auction segment(s)) - not fetching again.")
+        progress(FETCH_DONE_PCT)
+    else:
+        history, timeline = fetch_history_and_timeline(
+            event_url, on_log=log, should_stop=should_stop,
+            on_progress=lambda frac: progress(frac * FETCH_DONE_PCT),
+        )
+        progress(FETCH_DONE_PCT)
     progress(TIMELINE_DONE_PCT)
 
     video_info = probe_video(source_video_path)
@@ -188,6 +219,7 @@ def build_chroma_key_overlay_video(
     time_offset_override: Optional[float] = None,
     time_scale_override: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    prefetched: Optional[tuple] = None,
 ) -> bool:
     """
     Exports just one listing's auction overlay (by its eBay item number) as
@@ -196,6 +228,11 @@ def build_chroma_key_overlay_video(
     for use as a separate layer in external editing software via chroma
     keying. source_video_path is only read (probed for duration/resolution/
     calibration), never modified or re-encoded.
+
+    prefetched, if given (a (history, timeline) pair from
+    fetch_history_and_timeline), skips re-fetching the event's auction/bid
+    history - for exporting a second/third/etc. item from the same event
+    without paying for the fetch again.
     """
     log = on_log or (lambda msg: None)
     progress = on_progress or (lambda pct: None)
@@ -203,6 +240,7 @@ def build_chroma_key_overlay_video(
     progress(0)
     calibrated = _fetch_and_calibrate(
         event_url, source_video_path, log, progress, time_offset_override, time_scale_override, should_stop,
+        prefetched=prefetched,
     )
     if calibrated is None:
         return False
@@ -239,6 +277,7 @@ def build_standalone_chroma_key_overlay_video(
     width: int = DEFAULT_STANDALONE_WIDTH,
     height: int = DEFAULT_STANDALONE_HEIGHT,
     should_stop: Optional[Callable[[], bool]] = None,
+    prefetched: Optional[tuple] = None,
 ) -> bool:
     """
     Same idea as build_chroma_key_overlay_video, but for when there's no
@@ -248,24 +287,29 @@ def build_standalone_chroma_key_overlay_video(
     instead of probing a source video for one. Requires the event to have
     already ended (a known end_time) since there's no video to derive a
     duration from otherwise.
+
+    prefetched, if given (a (history, timeline) pair from
+    fetch_history_and_timeline), skips re-fetching the event's auction/bid
+    history - for exporting a second/third/etc. item from the same event
+    without paying for the fetch again.
     """
     log = on_log or (lambda msg: None)
     progress = on_progress or (lambda pct: None)
 
     progress(0)
-    log("Fetching auction/bid history...")
-    history = fetch_full_history(
-        event_url, on_log=log, should_stop=should_stop,
-        on_progress=lambda frac: progress(frac * FETCH_DONE_PCT),
-    )
-    progress(FETCH_DONE_PCT)
+    if prefetched is not None:
+        history, timeline = prefetched
+        log(f"Reusing already-fetched auction/bid history ({len(timeline.auctions)} auction segment(s)) - not fetching again.")
+        progress(FETCH_DONE_PCT)
+    else:
+        history, timeline = fetch_history_and_timeline(
+            event_url, on_log=log, should_stop=should_stop,
+            on_progress=lambda frac: progress(frac * FETCH_DONE_PCT),
+        )
+        progress(FETCH_DONE_PCT)
     if should_stop is not None and should_stop():
         log("Stopped by user.")
         return False
-
-    log("Reconstructing timeline...")
-    timeline = build_timeline(history, on_log=log)
-    log(f"Timeline ready: {len(timeline.auctions)} auction segments.")
     progress(TIMELINE_DONE_PCT)
 
     if not history.get("end_time"):

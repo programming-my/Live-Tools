@@ -389,6 +389,17 @@ def build_timeline(history: dict, on_log: Optional[Callable[[str], None]] = None
     return OverlayTimeline(auctions, viewers)
 
 
+def _segment_rank(seg: dict) -> tuple:
+    """Ranks a segment by how much it looks like "the real auction" rather
+    than a pin flicker - most bids wins, then longest duration. Shared by
+    find_listing_segment (pick the best occurrence of one known listing)
+    and list_distinct_listings (dedupe a listing pinned more than once down
+    to a single dropdown entry)."""
+    end = seg.get("unpinned_offset")
+    duration = (end - seg["pinned_offset"]) if end is not None else float("inf")
+    return (len(seg.get("bids") or []), duration)
+
+
 def find_listing_segment(
     timeline: OverlayTimeline, listing_id: str, on_log: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
@@ -409,9 +420,30 @@ def find_listing_segment(
     if len(matches) > 1:
         log(f"Item number {listing_id} was pinned {len(matches)} separate times - using the occurrence with the most real activity.")
 
-    def _sort_key(seg: dict) -> tuple:
-        end = seg.get("unpinned_offset")
-        duration = (end - seg["pinned_offset"]) if end is not None else float("inf")
-        return (len(seg.get("bids") or []), duration)
+    return max(matches, key=_segment_rank)
 
-    return max(matches, key=_sort_key)
+
+def list_distinct_listings(timeline: OverlayTimeline) -> list:
+    """One entry per distinct listing in the timeline - {listing_id, title}
+    in the order each was first pinned - for populating a "pick which
+    auction to export" dropdown by title instead of requiring the item
+    number up front. A listing pinned more than once collapses to a single
+    entry via the same "most real activity" ranking find_listing_segment
+    uses, so the dropdown doesn't show (confusing) duplicate titles."""
+    best_by_listing: dict = {}
+    first_seen_offset: dict = {}
+    for seg in timeline.auctions:
+        listing_id = seg.get("listing_id")
+        if listing_id is None:
+            continue
+        if listing_id not in first_seen_offset:
+            first_seen_offset[listing_id] = seg["pinned_offset"]
+        current = best_by_listing.get(listing_id)
+        if current is None or _segment_rank(seg) > _segment_rank(current):
+            best_by_listing[listing_id] = seg
+
+    ordered_ids = sorted(best_by_listing.keys(), key=lambda lid: first_seen_offset[lid])
+    return [
+        {"listing_id": listing_id, "title": best_by_listing[listing_id].get("title") or f"Item {listing_id}"}
+        for listing_id in ordered_ids
+    ]

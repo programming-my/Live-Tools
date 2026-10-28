@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from overlay.timeline import OverlayTimeline, build_auction_segments, find_listing_segment
+from overlay.timeline import OverlayTimeline, build_auction_segments, find_listing_segment, list_distinct_listings
 
 START_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -96,3 +96,24 @@ def test_find_listing_segment_prefers_the_occurrence_with_real_bids():
     found = find_listing_segment(timeline, "111", on_log=logs.append)
     assert found is real
     assert any("pinned 2 separate times" in msg for msg in logs)
+
+
+def test_list_distinct_listings_dedupes_and_orders_chronologically():
+    """A dropdown of items shouldn't show the same listing twice just
+    because it was pinned more than once, and should list items in the
+    order they actually appeared in the event."""
+    item_a_flicker = {"listing_id": "111", "title": "Item A", "pinned_offset": 0, "unpinned_offset": 5, "bids": []}
+    item_b = {"listing_id": "222", "title": "Item B", "pinned_offset": 50, "unpinned_offset": 100, "bids": [{"amount": 1}]}
+    item_a_real = {"listing_id": "111", "title": "Item A", "pinned_offset": 200, "unpinned_offset": 260, "bids": [{"amount": 1}, {"amount": 2}]}
+    timeline = OverlayTimeline(auctions=[item_a_flicker, item_b, item_a_real], viewers=[])
+
+    items = list_distinct_listings(timeline)
+
+    assert [i["listing_id"] for i in items] == ["111", "222"]
+    assert items[0]["title"] == "Item A"
+
+
+def test_list_distinct_listings_falls_back_to_placeholder_title():
+    timeline = OverlayTimeline(auctions=[{"listing_id": "111", "title": None, "pinned_offset": 0, "unpinned_offset": 10, "bids": []}], viewers=[])
+    items = list_distinct_listings(timeline)
+    assert items == [{"listing_id": "111", "title": "Item 111"}]
