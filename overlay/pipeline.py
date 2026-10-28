@@ -40,7 +40,10 @@ def _fetch_and_calibrate(
     duration couldn't be determined (nothing usable to render against).
     """
     log("Fetching auction/bid history...")
-    history = fetch_full_history(event_url, on_log=log, should_stop=should_stop)
+    history = fetch_full_history(
+        event_url, on_log=log, should_stop=should_stop,
+        on_progress=lambda frac: progress(frac * FETCH_DONE_PCT),
+    )
     progress(FETCH_DONE_PCT)
 
     log("Reconstructing timeline...")
@@ -271,7 +274,10 @@ def build_standalone_chroma_key_overlay_video(
 
     progress(0)
     log("Fetching auction/bid history...")
-    history = fetch_full_history(event_url, on_log=log, should_stop=should_stop)
+    history = fetch_full_history(
+        event_url, on_log=log, should_stop=should_stop,
+        on_progress=lambda frac: progress(frac * FETCH_DONE_PCT),
+    )
     progress(FETCH_DONE_PCT)
     if should_stop is not None and should_stop():
         log("Stopped by user.")

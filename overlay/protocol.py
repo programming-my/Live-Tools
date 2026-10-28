@@ -38,6 +38,17 @@ WINDOW_READ_TIMEOUT = 6
 # the remaining ~75 minutes of the event one ever-smaller sub-window at a
 # time before naturally finishing.
 MAX_CONSECUTIVE_WINDOW_FAILURES = 8
+# A window that still fails once chunked down to MIN_CHUNK_SECONDS used to be
+# given up on immediately - but real eBay backend trouble has been observed
+# to be transient (recovering again within seconds/minutes on its own), and
+# silently dropping that window's auction/bid messages isn't just a gap -
+# it directly produces wrong output: a listing whose AuctionStarted or final
+# high bid fell in a dropped window either vanishes from the render entirely
+# (no pin segment to attach its other events to) or shows a stale, too-low
+# final price (the real winning bid was never fetched). So retry a few more
+# times with a short delay before truly giving up on a minimal window.
+MIN_CHUNK_RETRY_ATTEMPTS = 4
+MIN_CHUNK_RETRY_DELAY_SECONDS = 5.0
 
 
 class _FailureTracker:
@@ -246,12 +257,38 @@ async def _fetch_category(
     on_log: Callable[[str], None],
     tracker: _FailureTracker,
     should_stop: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
+    lost_ranges: Optional[list] = None,
+    _top_start: Optional[datetime] = None,
+    _top_total_seconds: Optional[float] = None,
 ) -> list:
     """Fetches one category across the full duration, chunked, halving a
     chunk on error - unless `tracker` has already recorded too many
     consecutive failures (see MAX_CONSECUTIVE_WINDOW_FAILURES) or
     `should_stop` reports the job was cancelled, in which case this stops
-    early and returns whatever was gathered so far."""
+    early and returns whatever was gathered so far.
+
+    A window that still fails once split all the way down to
+    MIN_CHUNK_SECONDS gets a few extra retries (see
+    MIN_CHUNK_RETRY_ATTEMPTS) before being truly given up on - and when it
+    is, its (start, end) is appended to `lost_ranges` (if given) so the
+    caller can warn that the final result may be missing data for that
+    stretch of the event, rather than that gap passing silently.
+
+    on_progress, if given, is called with a 0.0-1.0 fraction of this
+    category's full (top-level) time range covered so far - including
+    partial credit as a failing chunk gets split into smaller ones, since a
+    troubled stretch of an event can otherwise spend a long time with
+    nothing to show for it (see MAX_CONSECUTIVE_WINDOW_FAILURES's docstring
+    for the real event that prompted this). _top_start/_top_total_seconds
+    are for internal recursive use only - always relative to the original
+    (unsplit) call's own window, not whatever sub-window got halved into.
+    """
+    if _top_start is None:
+        _top_start = window_start
+    if _top_total_seconds is None:
+        _top_total_seconds = (window_end - window_start).total_seconds() or 1.0
+
     all_messages = []
     cursor_time = window_start
     while cursor_time < window_end:
@@ -279,15 +316,48 @@ async def _fetch_category(
                 half = max(chunk_seconds // 2, MIN_CHUNK_SECONDS)
                 sub_messages = await _fetch_category(
                     ws, common_headers, event_id, message_types, cursor_time, chunk_end, half, on_log,
-                    tracker, should_stop,
+                    tracker, should_stop, on_progress, lost_ranges, _top_start, _top_total_seconds,
                 )
                 all_messages.extend(sub_messages)
             else:
-                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}), giving up on this slice.")
+                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) at the minimum chunk size - retrying a few more times before giving up on it.")
+                recovered = False
+                for retry_num in range(1, MIN_CHUNK_RETRY_ATTEMPTS + 1):
+                    if tracker.aborted:
+                        break
+                    await asyncio.sleep(MIN_CHUNK_RETRY_DELAY_SECONDS)
+                    retry_messages, retry_error = await _fetch_window(
+                        ws, common_headers, event_id, message_types, None,
+                        _to_iso(cursor_time), _to_iso(chunk_end),
+                    )
+                    if not retry_error:
+                        on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} recovered on retry {retry_num}.")
+                        tracker.record_success()
+                        all_messages.extend(retry_messages)
+                        recovered = True
+                        break
+                    if tracker.record_failure():
+                        on_log(
+                            f"{tracker.consecutive} window fetches in a row failed to get a response - the "
+                            "connection appears to have stopped responding partway through the event. "
+                            "Stopping early with whatever was gathered so far instead of grinding through "
+                            "the rest of the event the same way."
+                        )
+                if not recovered and not tracker.aborted:
+                    on_log(
+                        f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) even after "
+                        f"{MIN_CHUNK_RETRY_ATTEMPTS} extra retries - giving up on this slice. Auctions active "
+                        "during this time range may be missing from the result or show a stale final price."
+                    )
+                    if lost_ranges is not None:
+                        lost_ranges.append((cursor_time, chunk_end))
         else:
             tracker.record_success()
             all_messages.extend(messages)
         cursor_time = chunk_end
+        if on_progress is not None:
+            frac = (cursor_time - _top_start).total_seconds() / _top_total_seconds
+            on_progress(min(max(frac, 0.0), 1.0))
     return all_messages
 
 
@@ -326,6 +396,7 @@ def fetch_full_history(
     event_url: str,
     on_log: Optional[Callable[[str], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
 ) -> dict:
     """
     Fetches the complete auction/bid history for an event's replay.
@@ -334,9 +405,22 @@ def fetch_full_history(
     should_stop, if given, is polled between window fetches so a cancelled
     job stops promptly instead of running to completion (or to the failure
     circuit breaker below) regardless.
+
+    on_progress, if given, is called with a 0.0-1.0 fraction of this whole
+    fetch as it proceeds (auctions, then pin updates, then the viewer-count
+    snapshot) - without this, a long or troubled fetch (see
+    MAX_CONSECUTIVE_WINDOW_FAILURES) looks identical to a hung one, since
+    the only feedback otherwise is scrolling log lines with no indication
+    of how much of the event is actually left.
     """
     log = on_log or (lambda msg: None)
     tracker = _FailureTracker()
+    lost_ranges: list = []
+
+    def _scaled_progress(base: float, weight: float) -> Optional[Callable[[float], None]]:
+        if on_progress is None:
+            return None
+        return lambda frac: on_progress(base + frac * weight)
 
     log("Bootstrapping session (loading event page for auth token)...")
     session = bootstrap_session(event_url)
@@ -377,14 +461,14 @@ def fetch_full_history(
                 log("Fetching auction/bid history...")
                 auctions = await _fetch_category(
                     ws, common_headers, event_id, AUCTION_MESSAGE_TYPES, start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
-                    log, tracker, should_stop,
+                    log, tracker, should_stop, _scaled_progress(0.0, 0.6), lost_ranges,
                 )
                 log(f"Fetched {len(auctions)} auction/bid events.")
 
                 log("Fetching pin/listing history...")
                 pin_updates = await _fetch_category(
                     ws, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
-                    log, tracker, should_stop,
+                    log, tracker, should_stop, _scaled_progress(0.6, 0.35), lost_ranges,
                 )
                 log(f"Fetched {len(pin_updates)} pin-update events.")
 
@@ -398,12 +482,25 @@ def fetch_full_history(
                         _to_iso(start_dt), _to_iso(end_dt),
                     )
                     log(f"Fetched {len(viewer_stats)} viewer-count data points.")
+                if on_progress is not None:
+                    on_progress(1.0)
 
                 return auctions, pin_updates, viewer_stats
             finally:
                 heartbeat_task.cancel()
 
     auctions, pin_updates, viewer_stats = asyncio.run(_run())
+
+    if lost_ranges:
+        total_lost_seconds = sum((b - a).total_seconds() for a, b in lost_ranges)
+        log(
+            f"WARNING: could not fetch complete auction/bid history for {len(lost_ranges)} time range(s) "
+            f"totaling {total_lost_seconds:.0f}s, even after retrying - any auction active during one of "
+            "these windows may be missing entirely from the result, or show an incomplete/stale final "
+            "price:"
+        )
+        for lost_start, lost_end in lost_ranges:
+            log(f"  - {lost_start.isoformat()} .. {lost_end.isoformat()}")
 
     return {
         "event_id": event_id,
@@ -412,6 +509,7 @@ def fetch_full_history(
         "auctions": auctions,
         "pin_updates": pin_updates,
         "viewer_stats": viewer_stats,
+        "lost_ranges": [(a.isoformat(), b.isoformat()) for a, b in lost_ranges],
     }
 
 
