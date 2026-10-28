@@ -366,7 +366,7 @@ body {
   top: 0;
   left: 0;
   bottom: 0;
-  width: 75%;
+  width: 85%;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -378,6 +378,10 @@ body {
   font-weight: 700;
   color: #0c310d;
   transition: background-color 0.2s ease, color 0.2s ease;
+  /* A high bid price (e.g. over $100,000) is long enough to wrap onto a
+     second line otherwise - force it onto one line instead, now that the
+     wider fill above gives it more room to actually fit. */
+  white-space: nowrap;
 }
 .btn-bid-fill.muted {
   /* Slightly larger than the ring rather than flush with it, so a thin

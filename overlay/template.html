@@ -126,7 +126,7 @@
     top: 0;
     left: 0;
     bottom: 0;
-    width: 75%;
+    width: 85%;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -137,6 +137,10 @@
     font-size: 4.17vw;
     font-weight: 700;
     color: #0c310d;
+    /* A high bid price (e.g. over $100,000) is long enough to wrap onto a
+       second line otherwise - force it onto one line instead, now that the
+       wider fill above gives it more room to actually fit. */
+    white-space: nowrap;
   }
   /* "Starting soon" (pinned, not yet active) / "Sold out" (ended) - neutral
      rather than the vivid green "Bid now" fill, since neither is biddable.
