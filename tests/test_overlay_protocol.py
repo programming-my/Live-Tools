@@ -70,9 +70,13 @@ def test_fetch_category_stops_early_after_sustained_failures():
     assert messages == []
     assert tracker.aborted is True
     assert any("connection appears to have stopped responding" in msg for msg in logs)
-    # Bounded well below what unrestrained recursive halving across 70
-    # minutes (down to MIN_CHUNK_SECONDS granularity) would have produced.
-    assert call_count["n"] <= MAX_CONSECUTIVE_WINDOW_FAILURES + 5
+    # Bounded well below what unrestrained recursive halving across the full
+    # 70 minutes (down to MIN_CHUNK_SECONDS granularity, each with its own
+    # full retry+pad budget) would cost - retries no longer count toward
+    # the threshold itself (see MAX_CONSECUTIVE_WINDOW_FAILURES's docstring),
+    # so more distinct window positions get tried before tripping than
+    # before, but it's still a small fraction of the whole event.
+    assert call_count["n"] < 300
 
 
 def test_fetch_category_recovers_from_a_few_isolated_failures():
@@ -297,6 +301,54 @@ def test_fetch_category_stops_immediately_on_connection_closed_without_retrying(
     assert any("the connection itself closed" in msg for msg in logs)
     # Didn't keep calling _fetch_window over and over after the connection closed.
     assert calls["n"] <= 3
+
+
+def test_two_adjacent_stubborn_windows_dont_abort_the_rest_of_a_healthy_fetch():
+    """The actual regression this encodes: a real export lost the last ~46
+    minutes of an otherwise perfectly healthy event because two adjacent
+    windows that were genuinely unrecoverable (a confirmed eBay-side bug,
+    not a dead connection) each needed enough retries that their combined
+    failure count alone crossed the circuit breaker's old threshold,
+    aborting everything after them. Two always-failing windows followed by
+    hours of otherwise-successful ones must NOT trip the breaker - both bad
+    windows should land in lost_ranges, and everything after them must
+    still be fetched."""
+    import overlay.protocol as protocol
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(hours=4)
+    stubborn_start = start + timedelta(minutes=190)  # near the far end of the range
+    stubborn_end = stubborn_start + timedelta(seconds=2 * protocol.MIN_CHUNK_SECONDS)
+
+    async def fails_only_in_the_stubborn_range(*args, **kwargs):
+        start_iso, end_iso = args[5], args[6]
+        req_start = protocol._parse_iso(start_iso)
+        if stubborn_start <= req_start < stubborn_end:
+            return [], "timeout"
+        return [{"ok": True}], None
+
+    original = protocol._fetch_window
+    original_delay = protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
+    protocol._fetch_window = fails_only_in_the_stubborn_range
+    protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 0
+    try:
+        logs = []
+        lost_ranges: list = []
+        tracker = _FailureTracker()
+        messages = asyncio.run(_fetch_category(
+            ws=None, common_headers={}, event_id="evt", message_types=["X"],
+            window_start=start, window_end=end, chunk_seconds=90,
+            on_log=logs.append, tracker=tracker, lost_ranges=lost_ranges,
+        ))
+    finally:
+        protocol._fetch_window = original
+        protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = original_delay
+
+    assert tracker.aborted is False
+    assert len(lost_ranges) >= 1
+    # The bulk of a 4-hour event (minus ~40s of genuinely-lost data) must
+    # still come through, including everything AFTER the stubborn pair.
+    assert len(messages) > 100
 
 
 def test_fetch_category_respects_should_stop():

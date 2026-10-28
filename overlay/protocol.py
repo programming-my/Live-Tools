@@ -33,22 +33,26 @@ WINDOW_READ_TIMEOUT = 6
 # every other window/category sharing that connection is equally dead, so
 # callers check for this prefix to abort immediately rather than retrying.
 CONNECTION_CLOSED_PREFIX = "connection closed: "
-# How many window fetches in a row (across all categories, recursion depths,
-# and minimum-chunk retries within one fetch_full_history call) are allowed
-# to fail before giving up on the rest of the event entirely, rather than
-# mechanically halving/retrying through however much of the event remains -
-# observed on a real event where eBay's backend stopped answering requests
-# on an otherwise still-open connection partway through: every subsequent
-# window, even a 1-2 second one, timed out, which without this would have
-# ground through the remaining ~75 minutes of the event one ever-smaller
-# sub-window at a time before naturally finishing. Raised well above
-# MIN_CHUNK_RETRY_ATTEMPTS's own worst case (one fully-stubborn region can
-# cost ~10 consecutive failures on its own: a few recursive splits down to
-# MIN_CHUNK_SECONDS, then every retry attempt) so that a single stubborn-
-# but-ultimately-recoverable region doesn't look like a dead connection -
-# while still catching a truly dead one within at most a couple of those
-# worst cases back to back, rather than 8 isolated window failures scattered
-# harmlessly across an otherwise fine event (each resets this back to 0).
+# How many *distinct window positions* in a row (across all categories and
+# recursion depths - but NOT counting a single position's own minimum-chunk
+# retries or padded attempt, see MIN_CHUNK_RETRY_ATTEMPTS below) are allowed
+# to fail on their first attempt before giving up on the rest of the event
+# entirely, rather than mechanically halving/retrying through however much
+# of the event remains.
+#
+# Originally this also counted every retry attempt, which caused a real
+# regression: two adjacent stubborn-but-recoverable-elsewhere windows (each
+# needing ~4 failures of its own just to recursively split down to
+# MIN_CHUNK_SECONDS, before its own 6 retries + 1 padded attempt) alone
+# crossed this threshold and aborted the entire rest of an otherwise healthy
+# fetch - silently dropping the last ~46 minutes of a real event's auction
+# data, even though the connection kept working fine both before and after
+# that pair (confirmed: it had already fetched 8600+ real events by then).
+# A genuinely dead *connection* (as opposed to one stubborn request) is now
+# caught immediately and directly via _is_connection_closed instead of by
+# counting timeouts - so this threshold only needs to catch the softer case
+# of a connection that stays open but the server stops answering on it, and
+# can afford to be generous about it.
 MAX_CONSECUTIVE_WINDOW_FAILURES = 20
 # A window that still fails once chunked down to MIN_CHUNK_SECONDS used to be
 # given up on immediately - but silently dropping that window's auction/bid
@@ -439,13 +443,15 @@ async def _fetch_category(
                         on_log(f"{retry_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
                         tracker.aborted = True
                         break
-                    if tracker.record_failure():
-                        on_log(
-                            f"{tracker.consecutive} window fetches in a row failed to get a response - the "
-                            "connection appears to have stopped responding partway through the event. "
-                            "Stopping early with whatever was gathered so far instead of grinding through "
-                            "the rest of the event the same way."
-                        )
+                    # Deliberately NOT tracker.record_failure() here - see
+                    # MAX_CONSECUTIVE_WINDOW_FAILURES's docstring for why a
+                    # stubborn window's own retries must never count toward
+                    # "the whole connection looks dead" (a real export lost
+                    # the last ~46 minutes of a perfectly healthy fetch this
+                    # way: two adjacent stubborn windows' retry attempts
+                    # alone crossed that threshold and aborted everything
+                    # after them, despite the connection working fine both
+                    # before and - almost certainly - after that pair).
                 if not recovered and not tracker.aborted:
                     padded_start = cursor_time - timedelta(seconds=WINDOW_PAD_SECONDS)
                     padded_end = chunk_end + timedelta(seconds=WINDOW_PAD_SECONDS)
@@ -470,8 +476,8 @@ async def _fetch_category(
                     elif _is_connection_closed(padded_error):
                         on_log(f"{padded_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
                         tracker.aborted = True
-                    else:
-                        tracker.record_failure()
+                    # else: deliberately not tracker.record_failure() - see
+                    # the comment above the retry loop.
                 if not recovered and not tracker.aborted:
                     on_log(
                         f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) even after "
