@@ -304,7 +304,13 @@ class OverlayExportState:
         self.filename: Optional[str] = None
         self.event_url: Optional[str] = None
         self.status: str = "IDLE"
-        self.logs: deque = deque(maxlen=500)
+        # A troubled event's fetch phase (retries, orphaned-event warnings)
+        # plus a long render phase can together produce several thousand
+        # lines - 500 was small enough that a burst of orphan-event warnings
+        # during timeline-building silently evicted the fetch phase's own
+        # retry/warning messages before anyone could read them, making a
+        # real data-loss warning invisible in practice.
+        self.logs: deque = deque(maxlen=5000)
         self.output_filename: Optional[str] = None
         self.progress: Optional[float] = None
         self.time_offset: Optional[float] = None

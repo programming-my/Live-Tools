@@ -33,9 +33,9 @@ def _run_fetch_category(fetch_window_impl, window_minutes=70, chunk_seconds=90, 
     import overlay.protocol as protocol
 
     original = protocol._fetch_window
-    original_delay = protocol.MIN_CHUNK_RETRY_DELAY_SECONDS
+    original_delay = protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
     protocol._fetch_window = fetch_window_impl
-    protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = 0  # don't actually wait in tests
+    protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 0  # don't actually wait in tests
     try:
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         end = start + timedelta(minutes=window_minutes)
@@ -49,7 +49,7 @@ def _run_fetch_category(fetch_window_impl, window_minutes=70, chunk_seconds=90, 
         return messages, logs, tracker
     finally:
         protocol._fetch_window = original
-        protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = original_delay
+        protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = original_delay
 
 
 def test_fetch_category_stops_early_after_sustained_failures():
@@ -112,9 +112,9 @@ def test_fetch_category_reports_increasing_progress():
     # through, so call _fetch_category directly here instead.
     import overlay.protocol as protocol
     original = protocol._fetch_window
-    original_delay = protocol.MIN_CHUNK_RETRY_DELAY_SECONDS
+    original_delay = protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
     protocol._fetch_window = flaky
-    protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = 0
+    protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 0
     try:
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         end = start + timedelta(minutes=20)
@@ -126,7 +126,7 @@ def test_fetch_category_reports_increasing_progress():
         ))
     finally:
         protocol._fetch_window = original
-        protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = original_delay
+        protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = original_delay
 
     assert len(progress_values) > 1
     assert progress_values[-1] == 1.0
@@ -152,9 +152,9 @@ def test_fetch_category_recovers_a_minimum_chunk_window_via_retry():
     lost_ranges: list = []
     import overlay.protocol as protocol
     original = protocol._fetch_window
-    original_delay = protocol.MIN_CHUNK_RETRY_DELAY_SECONDS
+    original_delay = protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
     protocol._fetch_window = fails_twice_then_recovers
-    protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = 0
+    protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 0
     try:
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         end = start + timedelta(seconds=protocol.MIN_CHUNK_SECONDS)
@@ -166,7 +166,7 @@ def test_fetch_category_recovers_a_minimum_chunk_window_via_retry():
         ))
     finally:
         protocol._fetch_window = original
-        protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = original_delay
+        protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = original_delay
 
     assert messages == [{"ok": True}]
     assert lost_ranges == []
@@ -179,14 +179,14 @@ def test_fetch_category_records_lost_range_when_retries_all_fail():
     dropped (the pre-existing behavior that caused real data loss)."""
     import overlay.protocol as protocol
     original = protocol._fetch_window
-    original_delay = protocol.MIN_CHUNK_RETRY_DELAY_SECONDS
+    original_delay = protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
     original_attempts = protocol.MIN_CHUNK_RETRY_ATTEMPTS
 
     async def always_times_out(*args, **kwargs):
         return [], "timeout"
 
     protocol._fetch_window = always_times_out
-    protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = 0
+    protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 0
     protocol.MIN_CHUNK_RETRY_ATTEMPTS = 2  # keep the tracker's consecutive count low
     try:
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -201,7 +201,7 @@ def test_fetch_category_records_lost_range_when_retries_all_fail():
         ))
     finally:
         protocol._fetch_window = original
-        protocol.MIN_CHUNK_RETRY_DELAY_SECONDS = original_delay
+        protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = original_delay
         protocol.MIN_CHUNK_RETRY_ATTEMPTS = original_attempts
 
     assert messages == []

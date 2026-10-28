@@ -28,27 +28,39 @@ AUCTION_MESSAGE_TYPES = [
 DEFAULT_CHUNK_SECONDS = 90
 MIN_CHUNK_SECONDS = 20
 WINDOW_READ_TIMEOUT = 6
-# How many window fetches in a row (across all categories and recursion
-# depths within one fetch_full_history call) are allowed to fail before
-# giving up on the rest of the event entirely, rather than mechanically
-# halving/retrying through however much of the event remains - observed on a
-# real event where eBay's backend stopped answering requests on an otherwise
-# still-open connection partway through: every subsequent window, even a
-# 1-2 second one, timed out, which without this would have ground through
-# the remaining ~75 minutes of the event one ever-smaller sub-window at a
-# time before naturally finishing.
-MAX_CONSECUTIVE_WINDOW_FAILURES = 8
+# How many window fetches in a row (across all categories, recursion depths,
+# and minimum-chunk retries within one fetch_full_history call) are allowed
+# to fail before giving up on the rest of the event entirely, rather than
+# mechanically halving/retrying through however much of the event remains -
+# observed on a real event where eBay's backend stopped answering requests
+# on an otherwise still-open connection partway through: every subsequent
+# window, even a 1-2 second one, timed out, which without this would have
+# ground through the remaining ~75 minutes of the event one ever-smaller
+# sub-window at a time before naturally finishing. Raised well above
+# MIN_CHUNK_RETRY_ATTEMPTS's own worst case (one fully-stubborn region can
+# cost ~10 consecutive failures on its own: a few recursive splits down to
+# MIN_CHUNK_SECONDS, then every retry attempt) so that a single stubborn-
+# but-ultimately-recoverable region doesn't look like a dead connection -
+# while still catching a truly dead one within at most a couple of those
+# worst cases back to back, rather than 8 isolated window failures scattered
+# harmlessly across an otherwise fine event (each resets this back to 0).
+MAX_CONSECUTIVE_WINDOW_FAILURES = 20
 # A window that still fails once chunked down to MIN_CHUNK_SECONDS used to be
-# given up on immediately - but real eBay backend trouble has been observed
-# to be transient (recovering again within seconds/minutes on its own), and
-# silently dropping that window's auction/bid messages isn't just a gap -
-# it directly produces wrong output: a listing whose AuctionStarted or final
-# high bid fell in a dropped window either vanishes from the render entirely
-# (no pin segment to attach its other events to) or shows a stale, too-low
-# final price (the real winning bid was never fetched). So retry a few more
-# times with a short delay before truly giving up on a minimal window.
-MIN_CHUNK_RETRY_ATTEMPTS = 4
-MIN_CHUNK_RETRY_DELAY_SECONDS = 5.0
+# given up on immediately - but silently dropping that window's auction/bid
+# messages isn't just a gap, it directly produces wrong output: a listing
+# whose AuctionStarted or final high bid fell in a dropped window either
+# vanishes from the render entirely or shows a stale, too-low final price.
+# A short flat retry (originally 4 attempts, 5s apart - under 20s of total
+# patience) turned out nowhere near enough on a real event where a handful
+# of windows stayed unavailable well past that - so this retries with
+# exponential backoff out to several minutes of total patience before truly
+# giving up. Each retry failure still counts toward MAX_CONSECUTIVE_WINDOW_
+# FAILURES above (see its own comment for why that threshold was raised to
+# tolerate this).
+MIN_CHUNK_RETRY_ATTEMPTS = 6
+MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 5.0
+MIN_CHUNK_RETRY_BACKOFF_FACTOR = 2.0
+MIN_CHUNK_RETRY_MAX_DELAY_SECONDS = 45.0
 
 
 class _FailureTracker:
@@ -320,18 +332,24 @@ async def _fetch_category(
                 )
                 all_messages.extend(sub_messages)
             else:
-                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) at the minimum chunk size - retrying a few more times before giving up on it.")
+                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) at the minimum chunk size - retrying with backoff before giving up on it.")
                 recovered = False
+                delay = MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
+                total_waited = 0.0
                 for retry_num in range(1, MIN_CHUNK_RETRY_ATTEMPTS + 1):
                     if tracker.aborted:
                         break
-                    await asyncio.sleep(MIN_CHUNK_RETRY_DELAY_SECONDS)
+                    if should_stop is not None and should_stop():
+                        break
+                    await asyncio.sleep(delay)
+                    total_waited += delay
+                    delay = min(delay * MIN_CHUNK_RETRY_BACKOFF_FACTOR, MIN_CHUNK_RETRY_MAX_DELAY_SECONDS)
                     retry_messages, retry_error = await _fetch_window(
                         ws, common_headers, event_id, message_types, None,
                         _to_iso(cursor_time), _to_iso(chunk_end),
                     )
                     if not retry_error:
-                        on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} recovered on retry {retry_num}.")
+                        on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} recovered on retry {retry_num} (after {total_waited:.0f}s).")
                         tracker.record_success()
                         all_messages.extend(retry_messages)
                         recovered = True
@@ -346,8 +364,9 @@ async def _fetch_category(
                 if not recovered and not tracker.aborted:
                     on_log(
                         f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) even after "
-                        f"{MIN_CHUNK_RETRY_ATTEMPTS} extra retries - giving up on this slice. Auctions active "
-                        "during this time range may be missing from the result or show a stale final price."
+                        f"{MIN_CHUNK_RETRY_ATTEMPTS} retries over ~{total_waited:.0f}s - giving up on this slice. "
+                        "Auctions active during this time range may be missing from the result or show a "
+                        "stale final price."
                     )
                     if lost_ranges is not None:
                         lost_ranges.append((cursor_time, chunk_end))

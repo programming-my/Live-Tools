@@ -195,10 +195,21 @@ def build_auction_segments(
         offset = (_epoch_ms_to_dt(event["serverCreatedAt"]) - start_dt).total_seconds()
         target = _find_containing_segment(segments_by_listing.get(listing_id, []), offset)
         if target is None:
-            log(f"No pin segment covers {event.get('typename')} for listing {listing_id} at {offset:.1f}s - treating as orphaned.")
-            orphan_events_by_listing.setdefault(listing_id, []).append(event)
+            orphan_events_by_listing.setdefault(listing_id, []).append((event, offset))
             continue
         _apply_auction_event_to_segment(target, event, start_dt)
+
+    if orphan_events_by_listing:
+        total_orphaned = sum(len(events) for events in orphan_events_by_listing.values())
+        log(
+            f"{total_orphaned} event(s) across {len(orphan_events_by_listing)} listing(s) didn't land inside "
+            "any pin segment (the listing's own pin/unpin event was likely lost upstream - see "
+            "fetch_full_history's lost_ranges warning, if any) - reconstructing a best-effort segment "
+            "for each from whatever was captured instead of logging every individual event:"
+        )
+        for listing_id, events in orphan_events_by_listing.items():
+            offsets = [offset for _event, offset in events]
+            log(f"  - listing {listing_id}: {len(events)} orphaned event(s), {min(offsets):.1f}s..{max(offsets):.1f}s")
 
     orphan_segments = []
     for listing_id, events in orphan_events_by_listing.items():
@@ -206,10 +217,26 @@ def build_auction_segments(
             "listing_id": listing_id, "title": None, "starting_price": None, "currency": "USD",
             "bids": [], "deadlines": [], "ended": False, "pin_detail_type": None, "pin_result": None,
         }
-        for event in events:
+        for event, _offset in events:
             _apply_auction_event_to_segment(seg, event, start_dt)
         if "start_offset" not in seg:
-            continue  # never actually started - nothing usable to show
+            # The real AuctionStarted/AuctionStartedV2 event itself never
+            # landed in any pin segment either (and wasn't recovered even
+            # after retrying - see MIN_CHUNK_RETRY_ATTEMPTS) - but losing the
+            # whole auction from the render when we still have other real
+            # signal for it (bids, an end event) is worse than showing a
+            # best-effort reconstruction with a start time inferred from the
+            # earliest event we do have.
+            candidate_offsets = [bid["offset"] for bid in seg["bids"]]
+            if "end_offset" in seg:
+                candidate_offsets.append(seg["end_offset"])
+            if not candidate_offsets:
+                continue  # truly nothing usable to show
+            seg["start_offset"] = min(candidate_offsets)
+            log(
+                f"Listing {listing_id}: never saw its AuctionStarted event - reconstructing its segment "
+                f"from {len(seg['bids'])} bid event(s) instead so it isn't dropped from the render entirely."
+            )
         seg["pinned_offset"] = seg["start_offset"]
         seg["unpinned_offset"] = seg.get("end_offset", seg["start_offset"]) + AUCTION_END_GRACE_SECONDS
         orphan_segments.append(seg)
