@@ -30,6 +30,7 @@ EXPORT_PROGRESS_PATTERN = re.compile(r"Export progress: ([\d.]+)%")
 def _fetch_and_calibrate(
     event_url: str, source_video_path: str, log: Callable[[str], None], progress: Callable[[float], None],
     time_offset_override: Optional[float], time_scale_override: Optional[float],
+    should_stop: Optional[Callable[[], bool]] = None,
 ):
     """
     Shared first half of both pipelines: fetch history, build the timeline,
@@ -39,7 +40,7 @@ def _fetch_and_calibrate(
     duration couldn't be determined (nothing usable to render against).
     """
     log("Fetching auction/bid history...")
-    history = fetch_full_history(event_url, on_log=log)
+    history = fetch_full_history(event_url, on_log=log, should_stop=should_stop)
     progress(FETCH_DONE_PCT)
 
     log("Reconstructing timeline...")
@@ -100,6 +101,7 @@ def build_overlay_video(
     workers: int = DEFAULT_WORKERS,
     time_offset_override: Optional[float] = None,
     time_scale_override: Optional[float] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """
     Full pipeline: fetch the event's auction history, reconstruct a
@@ -126,9 +128,12 @@ def build_overlay_video(
 
     progress(0)
     calibrated = _fetch_and_calibrate(
-        event_url, source_video_path, log, progress, time_offset_override, time_scale_override,
+        event_url, source_video_path, log, progress, time_offset_override, time_scale_override, should_stop,
     )
     if calibrated is None:
+        return False
+    if should_stop is not None and should_stop():
+        log("Stopped by user.")
         return False
     timeline, video_info, time_offset, time_scale = calibrated
     duration = video_info["duration_seconds"]
@@ -205,6 +210,7 @@ def build_chroma_key_overlay_video(
     workers: int = DEFAULT_WORKERS,
     time_offset_override: Optional[float] = None,
     time_scale_override: Optional[float] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """
     Same fetch/timeline/calibration/render steps as build_overlay_video, but
@@ -220,9 +226,12 @@ def build_chroma_key_overlay_video(
 
     progress(0)
     calibrated = _fetch_and_calibrate(
-        event_url, source_video_path, log, progress, time_offset_override, time_scale_override,
+        event_url, source_video_path, log, progress, time_offset_override, time_scale_override, should_stop,
     )
     if calibrated is None:
+        return False
+    if should_stop is not None and should_stop():
+        log("Stopped by user.")
         return False
     timeline, video_info, time_offset, time_scale = calibrated
     duration = video_info["duration_seconds"]
@@ -246,6 +255,7 @@ def build_standalone_chroma_key_overlay_video(
     workers: int = DEFAULT_WORKERS,
     width: int = DEFAULT_STANDALONE_WIDTH,
     height: int = DEFAULT_STANDALONE_HEIGHT,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """
     Same idea as build_chroma_key_overlay_video, but for when there's no
@@ -261,8 +271,11 @@ def build_standalone_chroma_key_overlay_video(
 
     progress(0)
     log("Fetching auction/bid history...")
-    history = fetch_full_history(event_url, on_log=log)
+    history = fetch_full_history(event_url, on_log=log, should_stop=should_stop)
     progress(FETCH_DONE_PCT)
+    if should_stop is not None and should_stop():
+        log("Stopped by user.")
+        return False
 
     log("Reconstructing timeline...")
     timeline = build_timeline(history, on_log=log)

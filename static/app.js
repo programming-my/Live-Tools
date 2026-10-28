@@ -32,6 +32,7 @@ const overlayExportTimeOffsetInput = document.getElementById("overlayExportTimeO
 const overlayExportTimeScaleInput = document.getElementById("overlayExportTimeScale");
 const overlayExportBtn = document.getElementById("overlayExportBtn");
 const overlayExportStatusBadge = document.getElementById("overlayExportStatusBadge");
+const overlayExportStopBtn = document.getElementById("overlayExportStopBtn");
 const overlayExportClearBtn = document.getElementById("overlayExportClearBtn");
 const overlayExportProgressRow = document.getElementById("overlayExportProgressRow");
 const overlayExportProgressFill = document.getElementById("overlayExportProgressFill");
@@ -256,6 +257,16 @@ async function startOverlayExport() {
   }
 
   renderOverlayExportLog.reset();
+  refreshOverlayExportStatus();
+}
+
+async function stopOverlayExport() {
+  const res = await fetch("/api/overlay-export/stop", { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || "Failed to stop the export.");
+    return;
+  }
   refreshOverlayExportStatus();
 }
 
@@ -528,6 +539,7 @@ function renderOverlayExport(exportState) {
   }
 
   overlayExportBtn.disabled = exportState.running;
+  overlayExportStopBtn.disabled = !exportState.running;
   overlayExportClearBtn.disabled = exportState.running;
   renderOverlayExportLog(exportState.logs || []);
 }
@@ -628,6 +640,7 @@ queueAddBtn.addEventListener("click", addToQueue);
 resumeQueueBtn.addEventListener("click", resumeQueue);
 clearQueueBtn.addEventListener("click", clearQueue);
 overlayExportBtn.addEventListener("click", startOverlayExport);
+overlayExportStopBtn.addEventListener("click", stopOverlayExport);
 overlayExportClearBtn.addEventListener("click", clearOverlayExport);
 clipAddRowBtn.addEventListener("click", () => addClipRow());
 clipExportBtn.addEventListener("click", startClipExport);

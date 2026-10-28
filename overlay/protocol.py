@@ -28,6 +28,40 @@ AUCTION_MESSAGE_TYPES = [
 DEFAULT_CHUNK_SECONDS = 90
 MIN_CHUNK_SECONDS = 20
 WINDOW_READ_TIMEOUT = 6
+# How many window fetches in a row (across all categories and recursion
+# depths within one fetch_full_history call) are allowed to fail before
+# giving up on the rest of the event entirely, rather than mechanically
+# halving/retrying through however much of the event remains - observed on a
+# real event where eBay's backend stopped answering requests on an otherwise
+# still-open connection partway through: every subsequent window, even a
+# 1-2 second one, timed out, which without this would have ground through
+# the remaining ~75 minutes of the event one ever-smaller sub-window at a
+# time before naturally finishing.
+MAX_CONSECUTIVE_WINDOW_FAILURES = 8
+
+
+class _FailureTracker:
+    """Shared across every _fetch_category call (and its recursive splits)
+    within one fetch_full_history run, so a string of failures in one
+    category - or across a split window boundary - is still recognized as
+    the same ongoing outage rather than resetting per recursive call."""
+
+    def __init__(self, max_consecutive: int = MAX_CONSECUTIVE_WINDOW_FAILURES) -> None:
+        self.consecutive = 0
+        self.max_consecutive = max_consecutive
+        self.aborted = False
+
+    def record_failure(self) -> bool:
+        """Returns True the first time this failure pushes us past the
+        threshold (so the caller logs the abort exactly once)."""
+        self.consecutive += 1
+        if self.consecutive >= self.max_consecutive and not self.aborted:
+            self.aborted = True
+            return True
+        return False
+
+    def record_success(self) -> None:
+        self.consecutive = 0
 
 
 def extract_event_id(event_url: str) -> Optional[str]:
@@ -210,26 +244,48 @@ async def _fetch_category(
     ws, common_headers: dict, event_id: str, message_types: list,
     window_start: datetime, window_end: datetime, chunk_seconds: int,
     on_log: Callable[[str], None],
+    tracker: _FailureTracker,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> list:
-    """Fetches one category across the full duration, chunked, halving a chunk on error."""
+    """Fetches one category across the full duration, chunked, halving a
+    chunk on error - unless `tracker` has already recorded too many
+    consecutive failures (see MAX_CONSECUTIVE_WINDOW_FAILURES) or
+    `should_stop` reports the job was cancelled, in which case this stops
+    early and returns whatever was gathered so far."""
     all_messages = []
     cursor_time = window_start
     while cursor_time < window_end:
+        if tracker.aborted:
+            break
+        if should_stop is not None and should_stop():
+            on_log("Stopped by user.")
+            break
         chunk_end = min(cursor_time + timedelta(seconds=chunk_seconds), window_end)
         messages, error = await _fetch_window(
             ws, common_headers, event_id, message_types, None,
             _to_iso(cursor_time), _to_iso(chunk_end),
         )
-        if error and chunk_seconds > MIN_CHUNK_SECONDS:
-            on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}), retrying smaller.")
-            half = max(chunk_seconds // 2, MIN_CHUNK_SECONDS)
-            sub_messages = await _fetch_category(
-                ws, common_headers, event_id, message_types, cursor_time, chunk_end, half, on_log,
-            )
-            all_messages.extend(sub_messages)
-        elif error:
-            on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}), giving up on this slice.")
+        if error:
+            if tracker.record_failure():
+                on_log(
+                    f"{tracker.consecutive} window fetches in a row failed to get a response - the "
+                    "connection appears to have stopped responding partway through the event. "
+                    "Stopping early with whatever was gathered so far instead of grinding through "
+                    "the rest of the event the same way."
+                )
+                break
+            if chunk_seconds > MIN_CHUNK_SECONDS:
+                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}), retrying smaller.")
+                half = max(chunk_seconds // 2, MIN_CHUNK_SECONDS)
+                sub_messages = await _fetch_category(
+                    ws, common_headers, event_id, message_types, cursor_time, chunk_end, half, on_log,
+                    tracker, should_stop,
+                )
+                all_messages.extend(sub_messages)
+            else:
+                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}), giving up on this slice.")
         else:
+            tracker.record_success()
             all_messages.extend(messages)
         cursor_time = chunk_end
     return all_messages
@@ -266,12 +322,21 @@ async def _fetch_keystone_snapshot(
     return response.get("messages", [])
 
 
-def fetch_full_history(event_url: str, on_log: Optional[Callable[[str], None]] = None) -> dict:
+def fetch_full_history(
+    event_url: str,
+    on_log: Optional[Callable[[str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> dict:
     """
     Fetches the complete auction/bid history for an event's replay.
     Returns {"event_id", "start_time", "end_time", "auctions": [...]}.
+
+    should_stop, if given, is polled between window fetches so a cancelled
+    job stops promptly instead of running to completion (or to the failure
+    circuit breaker below) regardless.
     """
     log = on_log or (lambda msg: None)
+    tracker = _FailureTracker()
 
     log("Bootstrapping session (loading event page for auth token)...")
     session = bootstrap_session(event_url)
@@ -310,19 +375,29 @@ def fetch_full_history(event_url: str, on_log: Optional[Callable[[str], None]] =
             heartbeat_task = asyncio.create_task(_heartbeat_loop(ws))
             try:
                 log("Fetching auction/bid history...")
-                auctions = await _fetch_category(ws, common_headers, event_id, AUCTION_MESSAGE_TYPES, start_dt, end_dt, DEFAULT_CHUNK_SECONDS, log)
+                auctions = await _fetch_category(
+                    ws, common_headers, event_id, AUCTION_MESSAGE_TYPES, start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
+                    log, tracker, should_stop,
+                )
                 log(f"Fetched {len(auctions)} auction/bid events.")
 
                 log("Fetching pin/listing history...")
-                pin_updates = await _fetch_category(ws, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS, log)
+                pin_updates = await _fetch_category(
+                    ws, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
+                    log, tracker, should_stop,
+                )
                 log(f"Fetched {len(pin_updates)} pin-update events.")
 
-                log("Fetching viewer count history (best-effort)...")
-                viewer_stats = await _fetch_keystone_snapshot(
-                    ws, common_headers, event_id, "LiveEventViewerStatsUpdatedV2", ["LiveEventViewerStatsUpdatedV2"],
-                    _to_iso(start_dt), _to_iso(end_dt),
-                )
-                log(f"Fetched {len(viewer_stats)} viewer-count data points.")
+                if tracker.aborted or (should_stop is not None and should_stop()):
+                    log("Skipping viewer count history - stopping early.")
+                    viewer_stats = []
+                else:
+                    log("Fetching viewer count history (best-effort)...")
+                    viewer_stats = await _fetch_keystone_snapshot(
+                        ws, common_headers, event_id, "LiveEventViewerStatsUpdatedV2", ["LiveEventViewerStatsUpdatedV2"],
+                        _to_iso(start_dt), _to_iso(end_dt),
+                    )
+                    log(f"Fetched {len(viewer_stats)} viewer-count data points.")
 
                 return auctions, pin_updates, viewer_stats
             finally:

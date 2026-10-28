@@ -297,6 +297,7 @@ class OverlayExportState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.thread: Optional[threading.Thread] = None
+        self.stop_event: Optional[threading.Event] = None
         self._reset_locked()
 
     def _reset_locked(self) -> None:
@@ -536,8 +537,10 @@ def _try_start_overlay_export(
             event_id = extract_event_id(event_url) or "event"
             output_path = os.path.join(DOWNLOADS_DIR, f"overlay_{event_id}_{int(time.time())}.mp4")
         overlay_export_state.reset(filename, event_url, time_offset, time_scale)
+        stop_event = threading.Event()
+        overlay_export_state.stop_event = stop_event
         thread = threading.Thread(
-            target=_run_overlay_export, args=(event_url, source_path, output_path, time_offset, time_scale), daemon=True,
+            target=_run_overlay_export, args=(event_url, source_path, output_path, time_offset, time_scale, stop_event), daemon=True,
         )
         overlay_export_state.thread = thread
         thread.start()
@@ -654,20 +657,25 @@ def _run_job(url: str, poll_interval: int, stop_event: threading.Event, queue_it
 def _run_overlay_export(
     event_url: str, source_path: Optional[str], output_path: str,
     time_offset: Optional[float] = None, time_scale: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     def on_log(message: str) -> None:
         overlay_export_state.log(message)
+
+    def should_stop() -> bool:
+        return stop_event is not None and stop_event.is_set()
 
     try:
         if source_path is not None:
             success = build_chroma_key_overlay_video(
                 event_url, source_path, output_path, on_log=on_log, on_progress=overlay_export_state.set_progress,
-                time_offset_override=time_offset, time_scale_override=time_scale,
+                time_offset_override=time_offset, time_scale_override=time_scale, should_stop=should_stop,
             )
         else:
             on_log("No downloaded replay found for this event - rendering directly from the event's own data instead.")
             success = build_standalone_chroma_key_overlay_video(
                 event_url, output_path, on_log=on_log, on_progress=overlay_export_state.set_progress,
+                should_stop=should_stop,
             )
 
         if success:
@@ -1020,6 +1028,13 @@ def start_overlay_export(req: OverlayExportRequest) -> dict:
 
 @app.get("/api/overlay-export/status")
 def get_overlay_export_status() -> dict:
+    return overlay_export_state.to_dict()
+
+
+@app.post("/api/overlay-export/stop")
+def stop_overlay_export() -> dict:
+    if overlay_export_state.stop_event is not None:
+        overlay_export_state.stop_event.set()
     return overlay_export_state.to_dict()
 
 
