@@ -2,10 +2,12 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from overlay.protocol import (
+    CONNECTION_CLOSED_PREFIX,
     MAX_CONSECUTIVE_WINDOW_FAILURES,
     MIN_CHUNK_SECONDS,
     _FailureTracker,
     _fetch_category,
+    _is_connection_closed,
 )
 
 
@@ -263,6 +265,38 @@ def test_fetch_category_recovers_via_padded_retry_when_exact_window_persistently
     assert messages[0]["typename"] == "InRange"
     assert lost_ranges == []
     assert any("recovered via a padded retry" in msg for msg in logs)
+
+
+def test_is_connection_closed_recognizes_the_prefix():
+    assert _is_connection_closed(f"{CONNECTION_CLOSED_PREFIX}ConnectionClosedError(...)") is True
+    assert _is_connection_closed("timeout - no frames of any kind arrived") is False
+    assert _is_connection_closed(None) is False
+    assert _is_connection_closed("") is False
+
+
+def test_fetch_category_stops_immediately_on_connection_closed_without_retrying():
+    """A real event crashed the whole fetch_full_history call (losing over
+    10,000 already-fetched events) when the websocket itself closed deep
+    into a retry sequence, because the resulting exception was never
+    caught. _fetch_window now reports this as a CONNECTION_CLOSED_PREFIX-ed
+    error instead of raising - _fetch_category must recognize it and abort
+    immediately (not retry/split/pad a connection that's gone), returning
+    whatever was already gathered."""
+    calls = {"n": 0}
+
+    async def succeeds_then_connection_closes(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [{"ok": True}], None
+        return [], f"{CONNECTION_CLOSED_PREFIX}ConnectionClosedError(...)"
+
+    messages, logs, tracker = _run_fetch_category(succeeds_then_connection_closes, window_minutes=70, chunk_seconds=90)
+
+    assert messages == [{"ok": True}]
+    assert tracker.aborted is True
+    assert any("the connection itself closed" in msg for msg in logs)
+    # Didn't keep calling _fetch_window over and over after the connection closed.
+    assert calls["n"] <= 3
 
 
 def test_fetch_category_respects_should_stop():

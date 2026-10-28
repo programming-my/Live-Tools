@@ -28,6 +28,11 @@ AUCTION_MESSAGE_TYPES = [
 DEFAULT_CHUNK_SECONDS = 90
 MIN_CHUNK_SECONDS = 20
 WINDOW_READ_TIMEOUT = 6
+# Marks a diagnostic string (from _read_matching_response/_fetch_window) as
+# meaning the websocket itself closed, not just one request timing out -
+# every other window/category sharing that connection is equally dead, so
+# callers check for this prefix to abort immediately rather than retrying.
+CONNECTION_CLOSED_PREFIX = "connection closed: "
 # How many window fetches in a row (across all categories, recursion depths,
 # and minimum-chunk retries within one fetch_full_history call) are allowed
 # to fail before giving up on the rest of the event entirely, rather than
@@ -121,6 +126,10 @@ def _parse_iso(ts: str) -> datetime:
 
 def _to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _is_connection_closed(error: Optional[str]) -> bool:
+    return bool(error) and error.startswith(CONNECTION_CLOSED_PREFIX)
 
 
 def _message_created_at(message: dict) -> Optional[datetime]:
@@ -238,6 +247,14 @@ async def _read_matching_response(ws, request_id: str, timeout: float) -> tuple[
             raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
         except asyncio.TimeoutError:
             break
+        except websockets.ConnectionClosed as e:
+            # Surfaced as a diagnostic string (prefixed so callers can
+            # recognize it - see CONNECTION_CLOSED_PREFIX) rather than left
+            # to propagate: an unhandled ConnectionClosed used to crash the
+            # entire fetch_full_history call outright, discarding every
+            # already-fetched message (thousands of real events, in one
+            # observed run) instead of returning what had been gathered.
+            return None, f"{CONNECTION_CLOSED_PREFIX}{e!r}"
         for frame_text in raw.split("\x00")[:-1] if raw.endswith("\x00") else [raw]:
             parsed = _parse_stomp_frame(frame_text)
             if not parsed:
@@ -254,7 +271,17 @@ async def _read_matching_response(ws, request_id: str, timeout: float) -> tuple[
             payload = envelope.get("payload", {})
             if payload.get("requestId") == request_id:
                 return payload, ""
-            mismatches.append(f"{payload.get('typename', '?')}(requestId={str(payload.get('requestId'))[:20]})")
+            typename = payload.get("typename", "?")
+            detail = f"requestId={str(payload.get('requestId'))[:20]}"
+            if "error" in typename.lower():
+                # This is the informative case: the server IS responding
+                # with something during the wait, just not a match for our
+                # request - a genuine (if unsolicited/untargeted) error
+                # payload is a much stronger signal than silence or a
+                # benign heartbeat/beacon, so surface its actual content
+                # rather than just its typename.
+                detail += f", errorCode={payload.get('errorCode')}, detail={json.dumps(payload)[:300]}"
+            mismatches.append(f"{typename}({detail})")
 
     if not heartbeats and not mismatches:
         diagnostic = "no frames of any kind arrived"
@@ -294,10 +321,15 @@ async def _fetch_window(
             {**common_headers, "destination": f"/liveevents/{event_id}", "content-type": "application/json"},
             json.dumps(envelope),
         )
-        await ws.send(frame)
+        try:
+            await ws.send(frame)
+        except websockets.ConnectionClosed as e:
+            return messages, f"{CONNECTION_CLOSED_PREFIX}{e!r}"
 
         response, diagnostic = await _read_matching_response(ws, request_id, timeout=WINDOW_READ_TIMEOUT)
         if response is None:
+            if diagnostic.startswith(CONNECTION_CLOSED_PREFIX):
+                return messages, diagnostic
             return messages, f"timeout - {diagnostic}"
         if "Error" in response.get("typename", ""):
             return messages, response.get("errorCode", response.get("typename"))
@@ -359,6 +391,10 @@ async def _fetch_category(
             ws, common_headers, event_id, message_types, None,
             _to_iso(cursor_time), _to_iso(chunk_end),
         )
+        if error and _is_connection_closed(error):
+            on_log(f"{error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
+            tracker.aborted = True
+            break
         if error:
             if tracker.record_failure():
                 on_log(
@@ -399,6 +435,10 @@ async def _fetch_category(
                         all_messages.extend(retry_messages)
                         recovered = True
                         break
+                    if _is_connection_closed(retry_error):
+                        on_log(f"{retry_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
+                        tracker.aborted = True
+                        break
                     if tracker.record_failure():
                         on_log(
                             f"{tracker.consecutive} window fetches in a row failed to get a response - the "
@@ -427,6 +467,9 @@ async def _fetch_category(
                         tracker.record_success()
                         all_messages.extend(filtered)
                         recovered = True
+                    elif _is_connection_closed(padded_error):
+                        on_log(f"{padded_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
+                        tracker.aborted = True
                     else:
                         tracker.record_failure()
                 if not recovered and not tracker.aborted:
@@ -527,54 +570,66 @@ def fetch_full_history(
             pass
 
     async def _run():
+        # Gathered incrementally into this dict (rather than only building
+        # the return value at the very end) so that if something outside
+        # _fetch_category's own handling still goes wrong - the initial
+        # handshake, or the final best-effort viewer-stats call - whatever
+        # was already fetched is still recovered below instead of being
+        # discarded by an unhandled exception crashing the whole call (as
+        # happened on a real event: a ConnectionClosed late in the run
+        # wiped out over 10,000 already-fetched auction/bid events).
+        gathered = {"auctions": [], "pin_updates": [], "viewer_stats": []}
+
         # ping_interval disabled: Fastly's relay doesn't answer WebSocket-protocol
         # pings, only STOMP-level heartbeats (which we send ourselves below) -
         # leaving the library's default keepalive on causes it to kill the
         # connection itself after ~20s thinking the server is unresponsive.
-        async with websockets.connect(WS_URL, subprotocols=["v10.stomp", "v11.stomp", "v12.stomp"], ping_interval=None) as ws:
-            common_headers = {
-                "X-EBAY-C-TRACKING": f"guid={session['guid']},pageId=0",
-                "X-EBAY-C-MARKETPLACE-ID": "EBAY-US",
-                "Accept-Language": "en-US",
-                "Authorization": session["token"],
-            }
-            await ws.send(_stomp_frame("CONNECT", {**common_headers, "accept-version": "1.2", "heart-beat": "10000,10000"}))
-            await ws.recv()
-            await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-0", "destination": f"/clients/{session['guid']}"}))
-            await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-1", "destination": f"/liveevents/{event_id}"}))
+        try:
+            async with websockets.connect(WS_URL, subprotocols=["v10.stomp", "v11.stomp", "v12.stomp"], ping_interval=None) as ws:
+                common_headers = {
+                    "X-EBAY-C-TRACKING": f"guid={session['guid']},pageId=0",
+                    "X-EBAY-C-MARKETPLACE-ID": "EBAY-US",
+                    "Accept-Language": "en-US",
+                    "Authorization": session["token"],
+                }
+                await ws.send(_stomp_frame("CONNECT", {**common_headers, "accept-version": "1.2", "heart-beat": "10000,10000"}))
+                await ws.recv()
+                await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-0", "destination": f"/clients/{session['guid']}"}))
+                await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-1", "destination": f"/liveevents/{event_id}"}))
 
-            heartbeat_task = asyncio.create_task(_heartbeat_loop(ws))
-            try:
-                log("Fetching auction/bid history...")
-                auctions = await _fetch_category(
-                    ws, common_headers, event_id, AUCTION_MESSAGE_TYPES, start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
-                    log, tracker, should_stop, _scaled_progress(0.0, 0.6), lost_ranges,
-                )
-                log(f"Fetched {len(auctions)} auction/bid events.")
-
-                log("Fetching pin/listing history...")
-                pin_updates = await _fetch_category(
-                    ws, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
-                    log, tracker, should_stop, _scaled_progress(0.6, 0.35), lost_ranges,
-                )
-                log(f"Fetched {len(pin_updates)} pin-update events.")
-
-                if tracker.aborted or (should_stop is not None and should_stop()):
-                    log("Skipping viewer count history - stopping early.")
-                    viewer_stats = []
-                else:
-                    log("Fetching viewer count history (best-effort)...")
-                    viewer_stats = await _fetch_keystone_snapshot(
-                        ws, common_headers, event_id, "LiveEventViewerStatsUpdatedV2", ["LiveEventViewerStatsUpdatedV2"],
-                        _to_iso(start_dt), _to_iso(end_dt),
+                heartbeat_task = asyncio.create_task(_heartbeat_loop(ws))
+                try:
+                    log("Fetching auction/bid history...")
+                    gathered["auctions"] = await _fetch_category(
+                        ws, common_headers, event_id, AUCTION_MESSAGE_TYPES, start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
+                        log, tracker, should_stop, _scaled_progress(0.0, 0.6), lost_ranges,
                     )
-                    log(f"Fetched {len(viewer_stats)} viewer-count data points.")
-                if on_progress is not None:
-                    on_progress(1.0)
+                    log(f"Fetched {len(gathered['auctions'])} auction/bid events.")
 
-                return auctions, pin_updates, viewer_stats
-            finally:
-                heartbeat_task.cancel()
+                    log("Fetching pin/listing history...")
+                    gathered["pin_updates"] = await _fetch_category(
+                        ws, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
+                        log, tracker, should_stop, _scaled_progress(0.6, 0.35), lost_ranges,
+                    )
+                    log(f"Fetched {len(gathered['pin_updates'])} pin-update events.")
+
+                    if tracker.aborted or (should_stop is not None and should_stop()):
+                        log("Skipping viewer count history - stopping early.")
+                    else:
+                        log("Fetching viewer count history (best-effort)...")
+                        gathered["viewer_stats"] = await _fetch_keystone_snapshot(
+                            ws, common_headers, event_id, "LiveEventViewerStatsUpdatedV2", ["LiveEventViewerStatsUpdatedV2"],
+                            _to_iso(start_dt), _to_iso(end_dt),
+                        )
+                        log(f"Fetched {len(gathered['viewer_stats'])} viewer-count data points.")
+                    if on_progress is not None:
+                        on_progress(1.0)
+                finally:
+                    heartbeat_task.cancel()
+        except websockets.ConnectionClosed as e:
+            log(f"The sharing connection closed unexpectedly ({e!r}) - continuing with whatever was already gathered ({len(gathered['auctions'])} auction/bid event(s), {len(gathered['pin_updates'])} pin-update event(s)) instead of losing it all.")
+
+        return gathered["auctions"], gathered["pin_updates"], gathered["viewer_stats"]
 
     auctions, pin_updates, viewer_stats = asyncio.run(_run())
 
