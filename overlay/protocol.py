@@ -28,31 +28,48 @@ AUCTION_MESSAGE_TYPES = [
 DEFAULT_CHUNK_SECONDS = 90
 MIN_CHUNK_SECONDS = 20
 WINDOW_READ_TIMEOUT = 6
-# Marks a diagnostic string (from _read_matching_response/_fetch_window) as
+# How many window requests may be in flight at once, shared across BOTH
+# categories (auctions and pin updates run concurrently - see
+# fetch_full_history) via one asyncio.Semaphore - not per-category, so the
+# combined load on the connection/backend stays bounded by this one number
+# regardless of how many categories are running. Previously every window
+# was fetched strictly one at a time (send, await its own reply, only then
+# send the next) even though they're otherwise entirely independent
+# requests - that serialization, not any single slow request, was why a
+# multi-hour event's fetch took minutes even when every window succeeded
+# on its first try. Kept modest rather than cranked way up: eBay's backend
+# has already shown real flakiness under purely sequential load (the
+# PublishFailedException bug - see MIN_CHUNK_RETRY_ATTEMPTS), so there's a
+# genuine risk more concurrent load makes that worse, not just faster.
+MAX_CONCURRENT_WINDOWS = 10
+# Marks a diagnostic string (from _Multiplexer.request/_fetch_window) as
 # meaning the websocket itself closed, not just one request timing out -
 # every other window/category sharing that connection is equally dead, so
 # callers check for this prefix to abort immediately rather than retrying.
 CONNECTION_CLOSED_PREFIX = "connection closed: "
-# How many *distinct window positions* in a row (across all categories and
-# recursion depths - but NOT counting a single position's own minimum-chunk
-# retries or padded attempt, see MIN_CHUNK_RETRY_ATTEMPTS below) are allowed
+# How many *distinct window positions* (across all categories) are allowed
 # to fail on their first attempt before giving up on the rest of the event
-# entirely, rather than mechanically halving/retrying through however much
-# of the event remains.
+# entirely, rather than mechanically retrying through however much of the
+# event remains.
 #
-# Originally this also counted every retry attempt, which caused a real
-# regression: two adjacent stubborn-but-recoverable-elsewhere windows (each
-# needing ~4 failures of its own just to recursively split down to
-# MIN_CHUNK_SECONDS, before its own 6 retries + 1 padded attempt) alone
-# crossed this threshold and aborted the entire rest of an otherwise healthy
-# fetch - silently dropping the last ~46 minutes of a real event's auction
-# data, even though the connection kept working fine both before and after
-# that pair (confirmed: it had already fetched 8600+ real events by then).
-# A genuinely dead *connection* (as opposed to one stubborn request) is now
-# caught immediately and directly via _is_connection_closed instead of by
-# counting timeouts - so this threshold only needs to catch the softer case
-# of a connection that stays open but the server stops answering on it, and
-# can afford to be generous about it.
+# Originally this also counted every minimum-chunk retry attempt, which
+# caused a real regression: two adjacent stubborn-but-recoverable-elsewhere
+# windows (each needing ~4 failures of its own just to recursively split
+# down to MIN_CHUNK_SECONDS, before its own 6 retries + 1 padded attempt)
+# alone crossed this threshold and aborted the entire rest of an otherwise
+# healthy fetch - silently dropping the last ~46 minutes of a real event's
+# auction data, even though the connection kept working fine both before
+# and after that pair (confirmed: it had already fetched 8600+ real events
+# by then). A genuinely dead *connection* (as opposed to one stubborn
+# request) is caught immediately and directly via the connection-closed
+# check instead of by counting timeouts - so this threshold only needs to
+# catch the softer case of a connection that stays open but the server
+# stops answering on it, and can afford to be generous about it.
+#
+# With concurrent window fetching, "in a row" means "in the order each
+# concurrent attempt happens to complete", not the order they were sent -
+# a reasonable enough proxy for "does this connection still work at all"
+# without needing a more elaborate statistical model.
 MAX_CONSECUTIVE_WINDOW_FAILURES = 20
 # A window that still fails once chunked down to MIN_CHUNK_SECONDS used to be
 # given up on immediately - but silently dropping that window's auction/bid
@@ -86,10 +103,10 @@ WINDOW_PAD_SECONDS = 8.0
 
 
 class _FailureTracker:
-    """Shared across every _fetch_category call (and its recursive splits)
-    within one fetch_full_history run, so a string of failures in one
-    category - or across a split window boundary - is still recognized as
-    the same ongoing outage rather than resetting per recursive call."""
+    """Shared across every window fetch (both categories, every recursive
+    split) within one fetch_full_history run, so a string of failures
+    anywhere is recognized as the same ongoing outage rather than resetting
+    per category or split."""
 
     def __init__(self, max_consecutive: int = MAX_CONSECUTIVE_WINDOW_FAILURES) -> None:
         self.consecutive = 0
@@ -228,82 +245,121 @@ def _parse_stomp_frame(raw: str) -> Optional[tuple[str, dict, str]]:
     return command, headers, body
 
 
-async def _read_matching_response(ws, request_id: str, timeout: float) -> tuple[Optional[dict], str]:
-    """Reads STOMP frames until one whose JSON payload.requestId matches, or
-    timeout. Returns (payload_or_None, diagnostic) - on a timeout,
-    diagnostic summarizes whatever WAS observed while waiting: true network
-    silence, heartbeats only, or - most informative - a real payload that
-    just didn't match this specific requestId (its own typename/requestId
-    are included). The last case means the server DID respond to
-    *something* during the wait, which the generic "timeout" string alone
-    couldn't reveal - e.g. it could be a slow response to an earlier,
-    already-abandoned attempt for this same window arriving too late to be
-    useful, rather than the server never processing the request at all."""
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + timeout
-    heartbeats = 0
-    mismatches: list = []
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            break
+class _Multiplexer:
+    """Wraps a single websocket connection so many coroutines can each send
+    a request and concurrently await their own matching response, instead
+    of one caller having to fully finish (send, then block reading until
+    its own reply shows up) before the next caller can even send theirs.
+
+    Only one coroutine may safely call ws.recv() on a given connection at a
+    time - concurrent readers would race, nondeterministically stealing
+    frames from each other. A single background task owns ws.recv() here
+    and demultiplexes each incoming payload to whichever pending request is
+    waiting for that requestId (via a dict of futures), so this is what
+    actually makes "many windows fetched at once" safe rather than just
+    "many windows requested at once and hoping for the best". Concurrent
+    *sends* are a real hazard too (interleaved writes can corrupt the
+    frame stream), so all sends - including the heartbeat loop's - go
+    through the same lock.
+    """
+
+    def __init__(self, ws):
+        self.ws = ws
+        self._pending: dict = {}
+        self._send_lock = asyncio.Lock()
+        self._reader_task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        self._reader_task = asyncio.create_task(self._read_loop())
+
+    async def stop(self) -> None:
+        if self._reader_task is None:
+            return
+        self._reader_task.cancel()
         try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-        except asyncio.TimeoutError:
-            break
+            await self._reader_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def send_raw(self, data: str) -> None:
+        async with self._send_lock:
+            await self.ws.send(data)
+
+    async def _read_loop(self) -> None:
+        try:
+            while True:
+                raw = await self.ws.recv()
+                self._dispatch(raw)
         except websockets.ConnectionClosed as e:
-            # Surfaced as a diagnostic string (prefixed so callers can
-            # recognize it - see CONNECTION_CLOSED_PREFIX) rather than left
-            # to propagate: an unhandled ConnectionClosed used to crash the
-            # entire fetch_full_history call outright, discarding every
-            # already-fetched message (thousands of real events, in one
-            # observed run) instead of returning what had been gathered.
-            return None, f"{CONNECTION_CLOSED_PREFIX}{e!r}"
+            self._fail_all_pending(e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._fail_all_pending(e)
+
+    def _dispatch(self, raw: str) -> None:
         for frame_text in raw.split("\x00")[:-1] if raw.endswith("\x00") else [raw]:
             parsed = _parse_stomp_frame(frame_text)
             if not parsed:
-                heartbeats += 1
-                continue
+                continue  # heartbeat
             _command, _headers, body = parsed
             if not body.strip():
-                heartbeats += 1
                 continue
             try:
                 envelope = json.loads(body)
             except json.JSONDecodeError:
                 continue
             payload = envelope.get("payload", {})
-            if payload.get("requestId") == request_id:
-                return payload, ""
-            typename = payload.get("typename", "?")
-            detail = f"requestId={str(payload.get('requestId'))[:20]}"
-            if "error" in typename.lower():
-                # This is the informative case: the server IS responding
-                # with something during the wait, just not a match for our
-                # request - a genuine (if unsolicited/untargeted) error
-                # payload is a much stronger signal than silence or a
-                # benign heartbeat/beacon, so surface its actual content
-                # rather than just its typename.
-                detail += f", errorCode={payload.get('errorCode')}, detail={json.dumps(payload)[:300]}"
-            mismatches.append(f"{typename}({detail})")
+            request_id = payload.get("requestId")
+            future = self._pending.pop(request_id, None) if request_id else None
+            # No match (an unsolicited/untargeted payload, or a response
+            # that arrived after its own request already gave up and moved
+            # on) is simply dropped - this used to be logged in rich detail
+            # while tracking down a real eBay-side bug (a PublishFailedException
+            # showing up as exactly this kind of unmatched frame), which is
+            # already understood now and doesn't need per-frame forensics
+            # going forward.
+            if future is not None and not future.done():
+                future.set_result(payload)
 
-    if not heartbeats and not mismatches:
-        diagnostic = "no frames of any kind arrived"
-    else:
-        parts = []
-        if heartbeats:
-            parts.append(f"{heartbeats} heartbeat(s)")
-        if mismatches:
-            parts.append(f"{len(mismatches)} mismatched payload(s): {', '.join(mismatches[:5])}")
-        diagnostic = ", ".join(parts)
-    return None, diagnostic
+    def _fail_all_pending(self, exc: Exception) -> None:
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(exc)
+        self._pending.clear()
+
+    async def request(self, frame: str, request_id: str, timeout: float) -> tuple[Optional[dict], str]:
+        """Sends `frame` and awaits the response matching request_id.
+        Returns (payload_or_None, diagnostic) - diagnostic is "timeout" or
+        a CONNECTION_CLOSED_PREFIX-ed string on failure, "" on success."""
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._pending[request_id] = future
+        try:
+            async with self._send_lock:
+                await self.ws.send(frame)
+        except websockets.ConnectionClosed as e:
+            self._pending.pop(request_id, None)
+            return None, f"{CONNECTION_CLOSED_PREFIX}{e!r}"
+        try:
+            payload = await asyncio.wait_for(future, timeout=timeout)
+            return payload, ""
+        except asyncio.TimeoutError:
+            self._pending.pop(request_id, None)
+            return None, "timeout"
+        except websockets.ConnectionClosed as e:
+            return None, f"{CONNECTION_CLOSED_PREFIX}{e!r}"
 
 
 async def _fetch_window(
-    ws, common_headers: dict, event_id: str, message_types: list, keystone_field: Optional[str],
+    mux: _Multiplexer, common_headers: dict, event_id: str, message_types: list, keystone_field: Optional[str],
     start_iso: str, end_iso: str, page_size: int = 200,
 ) -> tuple[list, Optional[str]]:
-    """Fetches all messages for one time window via cursor pagination. Returns (messages, error)."""
+    """Fetches all messages for one time window via cursor pagination
+    (inherently sequential - each page's cursor is only known from the
+    previous page's response). Returns (messages, error)."""
     messages = []
     cursor = None
     while True:
@@ -325,16 +381,9 @@ async def _fetch_window(
             {**common_headers, "destination": f"/liveevents/{event_id}", "content-type": "application/json"},
             json.dumps(envelope),
         )
-        try:
-            await ws.send(frame)
-        except websockets.ConnectionClosed as e:
-            return messages, f"{CONNECTION_CLOSED_PREFIX}{e!r}"
-
-        response, diagnostic = await _read_matching_response(ws, request_id, timeout=WINDOW_READ_TIMEOUT)
+        response, diagnostic = await mux.request(frame, request_id, timeout=WINDOW_READ_TIMEOUT)
         if response is None:
-            if diagnostic.startswith(CONNECTION_CLOSED_PREFIX):
-                return messages, diagnostic
-            return messages, f"timeout - {diagnostic}"
+            return messages, diagnostic
         if "Error" in response.get("typename", ""):
             return messages, response.get("errorCode", response.get("typename"))
 
@@ -344,161 +393,192 @@ async def _fetch_window(
             return messages, None
 
 
+async def _fetch_one_window_with_recovery(
+    mux: _Multiplexer, common_headers: dict, event_id: str, message_types: list,
+    start: datetime, end: datetime, chunk_seconds: int,
+    on_log: Callable[[str], None], tracker: _FailureTracker,
+    should_stop: Optional[Callable[[], bool]], lost_ranges: Optional[list],
+) -> list:
+    """Fetches one window, attempting it once and - if that fails -
+    recovering: split into smaller sub-windows and retry each (recursing
+    into itself down to MIN_CHUNK_SECONDS), and once at that minimum size,
+    retry with backoff and finally a padded attempt before truly giving up
+    on it. Called once per top-level window by _fetch_category, each as
+    its own concurrent task - this function handles that window's entire
+    lifecycle on its own rather than splitting "first attempt" and
+    "recovery" across two separate layers (which would otherwise redundantly
+    repeat the first attempt)."""
+    if tracker.aborted or (should_stop is not None and should_stop()):
+        return []
+
+    messages, error = await _fetch_window(mux, common_headers, event_id, message_types, None, _to_iso(start), _to_iso(end))
+    if not error:
+        tracker.record_success()
+        return messages
+
+    if _is_connection_closed(error):
+        on_log(f"{error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
+        tracker.aborted = True
+        return []
+
+    if tracker.record_failure():
+        on_log(
+            f"{tracker.consecutive} window fetches in a row failed to get a response - the "
+            "connection appears to have stopped responding partway through the event. "
+            "Stopping early with whatever was gathered so far instead of grinding through "
+            "the rest of the event the same way."
+        )
+        return []
+
+    if chunk_seconds > MIN_CHUNK_SECONDS:
+        on_log(f"Window {start.isoformat()}..{end.isoformat()} failed ({error}), retrying smaller.")
+        half = max(chunk_seconds // 2, MIN_CHUNK_SECONDS)
+        sub_messages = []
+        sub_start = start
+        while sub_start < end:
+            if tracker.aborted or (should_stop is not None and should_stop()):
+                break
+            sub_end = min(sub_start + timedelta(seconds=half), end)
+            sub_messages.extend(await _fetch_one_window_with_recovery(
+                mux, common_headers, event_id, message_types, sub_start, sub_end, half,
+                on_log, tracker, should_stop, lost_ranges,
+            ))
+            sub_start = sub_end
+        return sub_messages
+
+    on_log(f"Window {start.isoformat()}..{end.isoformat()} failed ({error}) at the minimum chunk size - retrying with backoff before giving up on it.")
+    delay = MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
+    total_waited = 0.0
+    for retry_num in range(1, MIN_CHUNK_RETRY_ATTEMPTS + 1):
+        if tracker.aborted:
+            break
+        if should_stop is not None and should_stop():
+            break
+        await asyncio.sleep(delay)
+        total_waited += delay
+        delay = min(delay * MIN_CHUNK_RETRY_BACKOFF_FACTOR, MIN_CHUNK_RETRY_MAX_DELAY_SECONDS)
+        retry_messages, retry_error = await _fetch_window(mux, common_headers, event_id, message_types, None, _to_iso(start), _to_iso(end))
+        if not retry_error:
+            on_log(f"Window {start.isoformat()}..{end.isoformat()} recovered on retry {retry_num} (after {total_waited:.0f}s).")
+            tracker.record_success()
+            return retry_messages
+        if _is_connection_closed(retry_error):
+            on_log(f"{retry_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
+            tracker.aborted = True
+            return []
+        # Deliberately NOT tracker.record_failure() here - see
+        # MAX_CONSECUTIVE_WINDOW_FAILURES's docstring for why a stubborn
+        # window's own retries must never count toward "the whole
+        # connection looks dead".
+
+    if tracker.aborted:
+        return []
+
+    padded_start = start - timedelta(seconds=WINDOW_PAD_SECONDS)
+    padded_end = end + timedelta(seconds=WINDOW_PAD_SECONDS)
+    padded_messages, padded_error = await _fetch_window(mux, common_headers, event_id, message_types, None, _to_iso(padded_start), _to_iso(padded_end))
+    if not padded_error:
+        filtered = [
+            m for m in padded_messages
+            if (ts := _message_created_at(m)) is None or start <= ts < end
+        ]
+        on_log(
+            f"Window {start.isoformat()}..{end.isoformat()} recovered via a padded "
+            f"retry ({len(filtered)} message(s) within the original range, out of "
+            f"{len(padded_messages)} fetched) - the exact-boundary request may have been hitting "
+            "a boundary-specific issue rather than a true data gap."
+        )
+        tracker.record_success()
+        return filtered
+    if _is_connection_closed(padded_error):
+        on_log(f"{padded_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
+        tracker.aborted = True
+        return []
+
+    on_log(
+        f"Window {start.isoformat()}..{end.isoformat()} failed ({error}) even after "
+        f"{MIN_CHUNK_RETRY_ATTEMPTS} retries over ~{total_waited:.0f}s and a padded retry - "
+        "giving up on this slice. Auctions active during this time range may be missing from "
+        "the result or show a stale final price."
+    )
+    if lost_ranges is not None:
+        lost_ranges.append((start, end))
+    return []
+
+
 async def _fetch_category(
-    ws, common_headers: dict, event_id: str, message_types: list,
+    mux: _Multiplexer, common_headers: dict, event_id: str, message_types: list,
     window_start: datetime, window_end: datetime, chunk_seconds: int,
     on_log: Callable[[str], None],
     tracker: _FailureTracker,
     should_stop: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[float], None]] = None,
     lost_ranges: Optional[list] = None,
-    _top_start: Optional[datetime] = None,
-    _top_total_seconds: Optional[float] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
 ) -> list:
-    """Fetches one category across the full duration, chunked, halving a
-    chunk on error - unless `tracker` has already recorded too many
-    consecutive failures (see MAX_CONSECUTIVE_WINDOW_FAILURES) or
-    `should_stop` reports the job was cancelled, in which case this stops
-    early and returns whatever was gathered so far.
+    """Fetches one category across the full duration. Every chunk_seconds-
+    sized window gets its own concurrent task (bounded by `semaphore` - see
+    MAX_CONCURRENT_WINDOWS) that handles that window's entire lifecycle -
+    its first attempt, and if that fails, the full recursive-split +
+    backoff-retry + padded-retry recovery (see
+    _fetch_one_window_with_recovery) - rather than one window at a time
+    for the whole category. A window stuck deep in its own recovery holds
+    onto its one semaphore slot for as long as that takes, but the other
+    (typically healthy) windows aren't blocked waiting on it.
 
-    A window that still fails once split all the way down to
-    MIN_CHUNK_SECONDS gets a few extra retries (see
-    MIN_CHUNK_RETRY_ATTEMPTS) before being truly given up on - and when it
-    is, its (start, end) is appended to `lost_ranges` (if given) so the
-    caller can warn that the final result may be missing data for that
-    stretch of the event, rather than that gap passing silently.
+    Stops early (returning whatever was gathered so far) if `tracker` has
+    recorded too many failures (see MAX_CONSECUTIVE_WINDOW_FAILURES) or
+    `should_stop` reports the job was cancelled.
 
     on_progress, if given, is called with a 0.0-1.0 fraction of this
-    category's full (top-level) time range covered so far - including
-    partial credit as a failing chunk gets split into smaller ones, since a
-    troubled stretch of an event can otherwise spend a long time with
-    nothing to show for it (see MAX_CONSECUTIVE_WINDOW_FAILURES's docstring
-    for the real event that prompted this). _top_start/_top_total_seconds
-    are for internal recursive use only - always relative to the original
-    (unsplit) call's own window, not whatever sub-window got halved into.
+    category's total duration *fully resolved* so far (a window counts
+    once its own recovery, if any, has finished) - a stubborn window's own
+    slice of progress is delayed until then, but every other concurrently-
+    completing window keeps the bar moving in the meantime.
     """
-    if _top_start is None:
-        _top_start = window_start
-    if _top_total_seconds is None:
-        _top_total_seconds = (window_end - window_start).total_seconds() or 1.0
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_WINDOWS)
 
-    all_messages = []
-    cursor_time = window_start
-    while cursor_time < window_end:
-        if tracker.aborted:
-            break
-        if should_stop is not None and should_stop():
-            on_log("Stopped by user.")
-            break
-        chunk_end = min(cursor_time + timedelta(seconds=chunk_seconds), window_end)
-        messages, error = await _fetch_window(
-            ws, common_headers, event_id, message_types, None,
-            _to_iso(cursor_time), _to_iso(chunk_end),
-        )
-        if error and _is_connection_closed(error):
-            on_log(f"{error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
-            tracker.aborted = True
-            break
-        if error:
-            if tracker.record_failure():
-                on_log(
-                    f"{tracker.consecutive} window fetches in a row failed to get a response - the "
-                    "connection appears to have stopped responding partway through the event. "
-                    "Stopping early with whatever was gathered so far instead of grinding through "
-                    "the rest of the event the same way."
-                )
-                break
-            if chunk_seconds > MIN_CHUNK_SECONDS:
-                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}), retrying smaller.")
-                half = max(chunk_seconds // 2, MIN_CHUNK_SECONDS)
-                sub_messages = await _fetch_category(
-                    ws, common_headers, event_id, message_types, cursor_time, chunk_end, half, on_log,
-                    tracker, should_stop, on_progress, lost_ranges, _top_start, _top_total_seconds,
-                )
-                all_messages.extend(sub_messages)
-            else:
-                on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) at the minimum chunk size - retrying with backoff before giving up on it.")
-                recovered = False
-                delay = MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
-                total_waited = 0.0
-                for retry_num in range(1, MIN_CHUNK_RETRY_ATTEMPTS + 1):
-                    if tracker.aborted:
-                        break
-                    if should_stop is not None and should_stop():
-                        break
-                    await asyncio.sleep(delay)
-                    total_waited += delay
-                    delay = min(delay * MIN_CHUNK_RETRY_BACKOFF_FACTOR, MIN_CHUNK_RETRY_MAX_DELAY_SECONDS)
-                    retry_messages, retry_error = await _fetch_window(
-                        ws, common_headers, event_id, message_types, None,
-                        _to_iso(cursor_time), _to_iso(chunk_end),
-                    )
-                    if not retry_error:
-                        on_log(f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} recovered on retry {retry_num} (after {total_waited:.0f}s).")
-                        tracker.record_success()
-                        all_messages.extend(retry_messages)
-                        recovered = True
-                        break
-                    if _is_connection_closed(retry_error):
-                        on_log(f"{retry_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
-                        tracker.aborted = True
-                        break
-                    # Deliberately NOT tracker.record_failure() here - see
-                    # MAX_CONSECUTIVE_WINDOW_FAILURES's docstring for why a
-                    # stubborn window's own retries must never count toward
-                    # "the whole connection looks dead" (a real export lost
-                    # the last ~46 minutes of a perfectly healthy fetch this
-                    # way: two adjacent stubborn windows' retry attempts
-                    # alone crossed that threshold and aborted everything
-                    # after them, despite the connection working fine both
-                    # before and - almost certainly - after that pair).
-                if not recovered and not tracker.aborted:
-                    padded_start = cursor_time - timedelta(seconds=WINDOW_PAD_SECONDS)
-                    padded_end = chunk_end + timedelta(seconds=WINDOW_PAD_SECONDS)
-                    padded_messages, padded_error = await _fetch_window(
-                        ws, common_headers, event_id, message_types, None,
-                        _to_iso(padded_start), _to_iso(padded_end),
-                    )
-                    if not padded_error:
-                        filtered = [
-                            m for m in padded_messages
-                            if (ts := _message_created_at(m)) is None or cursor_time <= ts < chunk_end
-                        ]
-                        on_log(
-                            f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} recovered via a padded "
-                            f"retry ({len(filtered)} message(s) within the original range, out of "
-                            f"{len(padded_messages)} fetched) - the exact-boundary request may have been hitting "
-                            "a boundary-specific issue rather than a true data gap."
-                        )
-                        tracker.record_success()
-                        all_messages.extend(filtered)
-                        recovered = True
-                    elif _is_connection_closed(padded_error):
-                        on_log(f"{padded_error} - the connection itself closed, stopping here with whatever was gathered so far rather than retrying a dead connection.")
-                        tracker.aborted = True
-                    # else: deliberately not tracker.record_failure() - see
-                    # the comment above the retry loop.
-                if not recovered and not tracker.aborted:
-                    on_log(
-                        f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) even after "
-                        f"{MIN_CHUNK_RETRY_ATTEMPTS} retries over ~{total_waited:.0f}s and a padded retry - "
-                        "giving up on this slice. Auctions active during this time range may be missing from "
-                        "the result or show a stale final price."
-                    )
-                    if lost_ranges is not None:
-                        lost_ranges.append((cursor_time, chunk_end))
-        else:
-            tracker.record_success()
-            all_messages.extend(messages)
-        cursor_time = chunk_end
+    total_seconds = (window_end - window_start).total_seconds() or 1.0
+    boundaries = []
+    cursor = window_start
+    while cursor < window_end:
+        end = min(cursor + timedelta(seconds=chunk_seconds), window_end)
+        boundaries.append((cursor, end))
+        cursor = end
+
+    completed_seconds = 0.0
+
+    def report_progress() -> None:
         if on_progress is not None:
-            frac = (cursor_time - _top_start).total_seconds() / _top_total_seconds
-            on_progress(min(max(frac, 0.0), 1.0))
+            on_progress(min(max(completed_seconds / total_seconds, 0.0), 1.0))
+
+    async def fetch_one(start: datetime, end: datetime) -> list:
+        nonlocal completed_seconds
+        async with semaphore:
+            if tracker.aborted or (should_stop is not None and should_stop()):
+                return []
+            messages = await _fetch_one_window_with_recovery(
+                mux, common_headers, event_id, message_types, start, end, chunk_seconds,
+                on_log, tracker, should_stop, lost_ranges,
+            )
+            completed_seconds += (end - start).total_seconds()
+            report_progress()
+            return messages
+
+    tasks = [asyncio.ensure_future(fetch_one(start, end)) for start, end in boundaries]
+    all_messages: list = []
+    for task in asyncio.as_completed(tasks):
+        all_messages.extend(await task)
+
+    if should_stop is not None and should_stop():
+        on_log("Stopped by user.")
+
     return all_messages
 
 
 async def _fetch_keystone_snapshot(
-    ws, common_headers: dict, event_id: str, keystone_event_type: str, message_types: list,
+    mux: _Multiplexer, common_headers: dict, event_id: str, keystone_event_type: str, message_types: list,
     start_iso: str, end_iso: str,
 ) -> list:
     """Best-effort snapshot fetch (e.g. viewer stats) - returns [] on any error rather than raising,
@@ -521,11 +601,30 @@ async def _fetch_keystone_snapshot(
         {**common_headers, "destination": f"/liveevents/{event_id}", "content-type": "application/json"},
         json.dumps(envelope),
     )
-    await ws.send(frame)
-    response, _diagnostic = await _read_matching_response(ws, request_id, timeout=15)
+    response, _diagnostic = await mux.request(frame, request_id, timeout=15)
     if response is None or "Error" in response.get("typename", ""):
         return []
     return response.get("messages", [])
+
+
+def _monotonic_progress(progress_fn: Optional[Callable[[float], None]]) -> Optional[Callable[[float], None]]:
+    """Wraps a progress callback so it never reports a value lower than one
+    it already reported. Needed once auctions and pin-updates fetch
+    concurrently (see fetch_full_history): each maps into its own slice of
+    the overall 0.0-1.0 range, but with both running at once, whichever
+    category's callback happens to fire last "wins" regardless of actual
+    order - without this, the progress bar could visibly jump backward
+    (e.g. pin-updates briefly reporting a later point than auctions)."""
+    if progress_fn is None:
+        return None
+    state = {"max": 0.0}
+
+    def wrapped(frac: float) -> None:
+        if frac > state["max"]:
+            state["max"] = frac
+            progress_fn(frac)
+
+    return wrapped
 
 
 def fetch_full_history(
@@ -543,8 +642,8 @@ def fetch_full_history(
     circuit breaker below) regardless.
 
     on_progress, if given, is called with a 0.0-1.0 fraction of this whole
-    fetch as it proceeds (auctions, then pin updates, then the viewer-count
-    snapshot) - without this, a long or troubled fetch (see
+    fetch as it proceeds (auctions and pin updates concurrently, then the
+    viewer-count snapshot) - without this, a long or troubled fetch (see
     MAX_CONSECUTIVE_WINDOW_FAILURES) looks identical to a hung one, since
     the only feedback otherwise is scrolling log lines with no indication
     of how much of the event is actually left.
@@ -552,6 +651,7 @@ def fetch_full_history(
     log = on_log or (lambda msg: None)
     tracker = _FailureTracker()
     lost_ranges: list = []
+    on_progress = _monotonic_progress(on_progress)
 
     def _scaled_progress(base: float, weight: float) -> Optional[Callable[[float], None]]:
         if on_progress is None:
@@ -565,11 +665,11 @@ def fetch_full_history(
     end_dt = _parse_iso(session["end_time"]) if session["end_time"] else datetime.now(timezone.utc)
     log(f"Event window: {start_dt.isoformat()} .. {end_dt.isoformat()}")
 
-    async def _heartbeat_loop(ws, interval=8):
+    async def _heartbeat_loop(mux: _Multiplexer, interval=8):
         try:
             while True:
                 await asyncio.sleep(interval)
-                await ws.send("\n")
+                await mux.send_raw("\n")
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -603,28 +703,29 @@ def fetch_full_history(
                 await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-0", "destination": f"/clients/{session['guid']}"}))
                 await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-1", "destination": f"/liveevents/{event_id}"}))
 
-                heartbeat_task = asyncio.create_task(_heartbeat_loop(ws))
+                mux = _Multiplexer(ws)
+                mux.start()
+                semaphore = asyncio.Semaphore(MAX_CONCURRENT_WINDOWS)
+                heartbeat_task = asyncio.create_task(_heartbeat_loop(mux))
                 try:
-                    log("Fetching auction/bid history...")
-                    gathered["auctions"] = await _fetch_category(
-                        ws, common_headers, event_id, AUCTION_MESSAGE_TYPES, start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
-                        log, tracker, should_stop, _scaled_progress(0.0, 0.6), lost_ranges,
-                    )
-                    log(f"Fetched {len(gathered['auctions'])} auction/bid events.")
-
-                    log("Fetching pin/listing history...")
-                    gathered["pin_updates"] = await _fetch_category(
-                        ws, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
-                        log, tracker, should_stop, _scaled_progress(0.6, 0.35), lost_ranges,
-                    )
-                    log(f"Fetched {len(gathered['pin_updates'])} pin-update events.")
+                    log("Fetching auction/bid history and pin/listing history concurrently...")
+                    auctions_task = asyncio.ensure_future(_fetch_category(
+                        mux, common_headers, event_id, AUCTION_MESSAGE_TYPES, start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
+                        log, tracker, should_stop, _scaled_progress(0.0, 0.6), lost_ranges, semaphore,
+                    ))
+                    pin_updates_task = asyncio.ensure_future(_fetch_category(
+                        mux, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
+                        log, tracker, should_stop, _scaled_progress(0.6, 0.35), lost_ranges, semaphore,
+                    ))
+                    gathered["auctions"], gathered["pin_updates"] = await asyncio.gather(auctions_task, pin_updates_task)
+                    log(f"Fetched {len(gathered['auctions'])} auction/bid events and {len(gathered['pin_updates'])} pin-update events.")
 
                     if tracker.aborted or (should_stop is not None and should_stop()):
                         log("Skipping viewer count history - stopping early.")
                     else:
                         log("Fetching viewer count history (best-effort)...")
                         gathered["viewer_stats"] = await _fetch_keystone_snapshot(
-                            ws, common_headers, event_id, "LiveEventViewerStatsUpdatedV2", ["LiveEventViewerStatsUpdatedV2"],
+                            mux, common_headers, event_id, "LiveEventViewerStatsUpdatedV2", ["LiveEventViewerStatsUpdatedV2"],
                             _to_iso(start_dt), _to_iso(end_dt),
                         )
                         log(f"Fetched {len(gathered['viewer_stats'])} viewer-count data points.")
@@ -632,6 +733,7 @@ def fetch_full_history(
                         on_progress(1.0)
                 finally:
                     heartbeat_task.cancel()
+                    await mux.stop()
         except websockets.ConnectionClosed as e:
             log(f"The sharing connection closed unexpectedly ({e!r}) - continuing with whatever was already gathered ({len(gathered['auctions'])} auction/bid event(s), {len(gathered['pin_updates'])} pin-update event(s)) instead of losing it all.")
 
