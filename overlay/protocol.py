@@ -61,6 +61,19 @@ MIN_CHUNK_RETRY_ATTEMPTS = 6
 MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 5.0
 MIN_CHUNK_RETRY_BACKOFF_FACTOR = 2.0
 MIN_CHUNK_RETRY_MAX_DELAY_SECONDS = 45.0
+# All MIN_CHUNK_RETRY_ATTEMPTS retries above query the exact same
+# [start, end) boundaries every time. That's the right move against a
+# transient outage (which the backoff gives real time to clear), but if a
+# window instead fails for every single retry over several minutes, that's
+# evidence against "transient" - and the exact-same-request retries would
+# never help against, say, a boundary-specific bug in the backend's own
+# windowed-history endpoint (as opposed to a genuine gap in its archive,
+# which padding can't fix either, but costs only one extra request to rule
+# out). So before truly giving up, try once more with the window padded
+# on both sides, then filter the response back down to just the originally
+# requested range - safe from duplicating anything, since adjacent windows
+# are fetched separately and never include data outside their own bounds.
+WINDOW_PAD_SECONDS = 8.0
 
 
 class _FailureTracker:
@@ -108,6 +121,13 @@ def _parse_iso(ts: str) -> datetime:
 
 def _to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _message_created_at(message: dict) -> Optional[datetime]:
+    ts_ms = message.get("serverCreatedAt")
+    if ts_ms is None:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
 
 
 def bootstrap_session(event_url: str) -> dict:
@@ -362,11 +382,34 @@ async def _fetch_category(
                             "the rest of the event the same way."
                         )
                 if not recovered and not tracker.aborted:
+                    padded_start = cursor_time - timedelta(seconds=WINDOW_PAD_SECONDS)
+                    padded_end = chunk_end + timedelta(seconds=WINDOW_PAD_SECONDS)
+                    padded_messages, padded_error = await _fetch_window(
+                        ws, common_headers, event_id, message_types, None,
+                        _to_iso(padded_start), _to_iso(padded_end),
+                    )
+                    if not padded_error:
+                        filtered = [
+                            m for m in padded_messages
+                            if (ts := _message_created_at(m)) is None or cursor_time <= ts < chunk_end
+                        ]
+                        on_log(
+                            f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} recovered via a padded "
+                            f"retry ({len(filtered)} message(s) within the original range, out of "
+                            f"{len(padded_messages)} fetched) - the exact-boundary request may have been hitting "
+                            "a boundary-specific issue rather than a true data gap."
+                        )
+                        tracker.record_success()
+                        all_messages.extend(filtered)
+                        recovered = True
+                    else:
+                        tracker.record_failure()
+                if not recovered and not tracker.aborted:
                     on_log(
                         f"Window {cursor_time.isoformat()}..{chunk_end.isoformat()} failed ({error}) even after "
-                        f"{MIN_CHUNK_RETRY_ATTEMPTS} retries over ~{total_waited:.0f}s - giving up on this slice. "
-                        "Auctions active during this time range may be missing from the result or show a "
-                        "stale final price."
+                        f"{MIN_CHUNK_RETRY_ATTEMPTS} retries over ~{total_waited:.0f}s and a padded retry - "
+                        "giving up on this slice. Auctions active during this time range may be missing from "
+                        "the result or show a stale final price."
                     )
                     if lost_ranges is not None:
                         lost_ranges.append((cursor_time, chunk_end))

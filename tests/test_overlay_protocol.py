@@ -209,6 +209,62 @@ def test_fetch_category_records_lost_range_when_retries_all_fail():
     assert any("giving up on this slice" in msg for msg in logs)
 
 
+def test_fetch_category_recovers_via_padded_retry_when_exact_window_persistently_fails():
+    """A window that fails every exact-boundary retry (simulating a
+    boundary-specific backend issue rather than a transient one - a real
+    event showed a window fail every retry over 165s, twice, and still
+    never recover) should still recover via one final padded-window
+    attempt, with the response correctly filtered back down to only
+    messages inside the originally-requested range (not the padding)."""
+    import overlay.protocol as protocol
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(seconds=protocol.MIN_CHUNK_SECONDS)
+
+    def _ms(dt):
+        return int(dt.timestamp() * 1000)
+
+    async def fails_exact_succeeds_padded(*args, **kwargs):
+        start_iso, end_iso = args[5], args[6]
+        requested_start = protocol._parse_iso(start_iso)
+        requested_end = protocol._parse_iso(end_iso)
+        span = (requested_end - requested_start).total_seconds()
+        if span <= protocol.MIN_CHUNK_SECONDS + 0.001:
+            return [], "timeout"
+        # A padded (wider) request - return one message inside the
+        # originally-requested range and one in the padding on each side,
+        # to verify the response gets filtered back down correctly.
+        return [
+            {"serverCreatedAt": _ms(start - timedelta(seconds=4)), "typename": "InPadding"},
+            {"serverCreatedAt": _ms(start + timedelta(seconds=5)), "typename": "InRange"},
+            {"serverCreatedAt": _ms(end + timedelta(seconds=4)), "typename": "InPadding"},
+        ], None
+
+    original = protocol._fetch_window
+    original_delay = protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS
+    original_attempts = protocol.MIN_CHUNK_RETRY_ATTEMPTS
+    protocol._fetch_window = fails_exact_succeeds_padded
+    protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = 0
+    protocol.MIN_CHUNK_RETRY_ATTEMPTS = 2
+    try:
+        logs = []
+        lost_ranges: list = []
+        messages = asyncio.run(_fetch_category(
+            ws=None, common_headers={}, event_id="evt", message_types=["X"],
+            window_start=start, window_end=end, chunk_seconds=protocol.MIN_CHUNK_SECONDS,
+            on_log=logs.append, tracker=_FailureTracker(), lost_ranges=lost_ranges,
+        ))
+    finally:
+        protocol._fetch_window = original
+        protocol.MIN_CHUNK_RETRY_INITIAL_DELAY_SECONDS = original_delay
+        protocol.MIN_CHUNK_RETRY_ATTEMPTS = original_attempts
+
+    assert len(messages) == 1
+    assert messages[0]["typename"] == "InRange"
+    assert lost_ranges == []
+    assert any("recovered via a padded retry" in msg for msg in logs)
+
+
 def test_fetch_category_respects_should_stop():
     calls = {"n": 0}
 
