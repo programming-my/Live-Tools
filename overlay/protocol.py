@@ -215,33 +215,37 @@ def _parse_stomp_frame(raw: str) -> Optional[tuple[str, dict, str]]:
     return command, headers, body
 
 
-async def _read_matching_response(ws, request_id: str, timeout: float) -> tuple[Optional[dict], int]:
+async def _read_matching_response(ws, request_id: str, timeout: float) -> tuple[Optional[dict], str]:
     """Reads STOMP frames until one whose JSON payload.requestId matches, or
-    timeout. Returns (payload_or_None, frames_seen) - frames_seen counts
-    every frame observed while waiting (matching or not, including
-    heartbeats), so a caller can tell "true network silence" (0) apart from
-    "something kept arriving, just never a match for this request" (>0) -
-    the generic "timeout" string alone couldn't distinguish these, which
-    mattered once a specific window started failing every retry no matter
-    how long we waited (see MIN_CHUNK_RETRY_ATTEMPTS)."""
+    timeout. Returns (payload_or_None, diagnostic) - on a timeout,
+    diagnostic summarizes whatever WAS observed while waiting: true network
+    silence, heartbeats only, or - most informative - a real payload that
+    just didn't match this specific requestId (its own typename/requestId
+    are included). The last case means the server DID respond to
+    *something* during the wait, which the generic "timeout" string alone
+    couldn't reveal - e.g. it could be a slow response to an earlier,
+    already-abandoned attempt for this same window arriving too late to be
+    useful, rather than the server never processing the request at all."""
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout
-    frames_seen = 0
+    heartbeats = 0
+    mismatches: list = []
     while True:
         remaining = deadline - loop.time()
         if remaining <= 0:
-            return None, frames_seen
+            break
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
         except asyncio.TimeoutError:
-            return None, frames_seen
+            break
         for frame_text in raw.split("\x00")[:-1] if raw.endswith("\x00") else [raw]:
-            frames_seen += 1
             parsed = _parse_stomp_frame(frame_text)
             if not parsed:
-                continue  # heartbeat - still proves the connection is alive
+                heartbeats += 1
+                continue
             _command, _headers, body = parsed
             if not body.strip():
+                heartbeats += 1
                 continue
             try:
                 envelope = json.loads(body)
@@ -249,7 +253,19 @@ async def _read_matching_response(ws, request_id: str, timeout: float) -> tuple[
                 continue
             payload = envelope.get("payload", {})
             if payload.get("requestId") == request_id:
-                return payload, frames_seen
+                return payload, ""
+            mismatches.append(f"{payload.get('typename', '?')}(requestId={str(payload.get('requestId'))[:20]})")
+
+    if not heartbeats and not mismatches:
+        diagnostic = "no frames of any kind arrived"
+    else:
+        parts = []
+        if heartbeats:
+            parts.append(f"{heartbeats} heartbeat(s)")
+        if mismatches:
+            parts.append(f"{len(mismatches)} mismatched payload(s): {', '.join(mismatches[:5])}")
+        diagnostic = ", ".join(parts)
+    return None, diagnostic
 
 
 async def _fetch_window(
@@ -280,10 +296,9 @@ async def _fetch_window(
         )
         await ws.send(frame)
 
-        response, frames_seen = await _read_matching_response(ws, request_id, timeout=WINDOW_READ_TIMEOUT)
+        response, diagnostic = await _read_matching_response(ws, request_id, timeout=WINDOW_READ_TIMEOUT)
         if response is None:
-            detail = "no frames of any kind arrived" if frames_seen == 0 else f"{frames_seen} frame(s) arrived but none matched"
-            return messages, f"timeout - {detail}"
+            return messages, f"timeout - {diagnostic}"
         if "Error" in response.get("typename", ""):
             return messages, response.get("errorCode", response.get("typename"))
 
@@ -458,7 +473,7 @@ async def _fetch_keystone_snapshot(
         json.dumps(envelope),
     )
     await ws.send(frame)
-    response, _frames_seen = await _read_matching_response(ws, request_id, timeout=15)
+    response, _diagnostic = await _read_matching_response(ws, request_id, timeout=15)
     if response is None or "Error" in response.get("typename", ""):
         return []
     return response.get("messages", [])
