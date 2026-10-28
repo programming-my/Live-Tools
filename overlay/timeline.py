@@ -423,27 +423,33 @@ def find_listing_segment(
     return max(matches, key=_segment_rank)
 
 
-def list_distinct_listings(timeline: OverlayTimeline) -> list:
-    """One entry per distinct listing in the timeline - {listing_id, title}
-    in the order each was first pinned - for populating a "pick which
-    auction to export" dropdown by title instead of requiring the item
-    number up front. A listing pinned more than once collapses to a single
-    entry via the same "most real activity" ranking find_listing_segment
-    uses, so the dropdown doesn't show (confusing) duplicate titles."""
-    best_by_listing: dict = {}
-    first_seen_offset: dict = {}
-    for seg in timeline.auctions:
-        listing_id = seg.get("listing_id")
-        if listing_id is None:
-            continue
-        if listing_id not in first_seen_offset:
-            first_seen_offset[listing_id] = seg["pinned_offset"]
-        current = best_by_listing.get(listing_id)
-        if current is None or _segment_rank(seg) > _segment_rank(current):
-            best_by_listing[listing_id] = seg
+def find_complete_segment_by_title(pin_events: list, title_query: str, start_dt: datetime) -> Optional[dict]:
+    """Builds pin segments from whatever pin_updates have been gathered so
+    far (not necessarily the whole event) and looks for one whose title
+    contains title_query (case-insensitive) AND is complete - has both a
+    pinned_offset and an unpinned_offset, i.e. the item's whole pin
+    lifecycle has actually been seen, not just its start. Used to let a
+    title-based search stop fetching pin_updates the moment a real match
+    is found, instead of needing the entire event's pin history first (see
+    overlay/protocol.py's fetch_history_for_title) - "complete" matters
+    here specifically because a half-seen segment might still turn out to
+    be a title match too, but we don't know its real bounds yet, so
+    stopping on an incomplete one would just need another pass.
 
-    ordered_ids = sorted(best_by_listing.keys(), key=lambda lid: first_seen_offset[lid])
-    return [
-        {"listing_id": listing_id, "title": best_by_listing[listing_id].get("title") or f"Item {listing_id}"}
-        for listing_id in ordered_ids
+    Among several complete matches (a listing pinned more than once, or
+    multiple similarly-titled listings seen so far), picks the one with
+    the most real activity (see _segment_rank) - but since this only sees
+    pin_updates scanned *up to the point of stopping*, an even better
+    match later in the event is never considered, by design - that's the
+    whole point of not scanning the rest of the event once satisfied."""
+    query = title_query.strip().lower()
+    if not query:
+        return None
+    segments = _build_pin_segments(pin_events, start_dt)
+    matches = [
+        seg for seg in segments
+        if seg.get("unpinned_offset") is not None and seg.get("title") and query in seg["title"].lower()
     ]
+    if not matches:
+        return None
+    return max(matches, key=_segment_rank)

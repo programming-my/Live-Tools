@@ -28,7 +28,7 @@ const resumeQueueBtn = document.getElementById("resumeQueueBtn");
 const clearQueueBtn = document.getElementById("clearQueueBtn");
 
 const overlayExportEventUrlInput = document.getElementById("overlayExportEventUrl");
-const overlayExportListingSelect = document.getElementById("overlayExportListingSelect");
+const overlayExportTitleQueryInput = document.getElementById("overlayExportTitleQuery");
 const overlayExportTimeOffsetInput = document.getElementById("overlayExportTimeOffset");
 const overlayExportTimeScaleInput = document.getElementById("overlayExportTimeScale");
 const overlayExportBtn = document.getElementById("overlayExportBtn");
@@ -41,14 +41,6 @@ const overlayExportProgressLabel = document.getElementById("overlayExportProgres
 const overlayExportDownloadRow = document.getElementById("overlayExportDownloadRow");
 const overlayExportDownloadLink = document.getElementById("overlayExportDownloadLink");
 const overlayExportLogEl = document.getElementById("overlayExportLog");
-
-const overlayItemsLoadBtn = document.getElementById("overlayItemsLoadBtn");
-const overlayItemsStatusBadge = document.getElementById("overlayItemsStatusBadge");
-const overlayItemsStopBtn = document.getElementById("overlayItemsStopBtn");
-const overlayItemsProgressRow = document.getElementById("overlayItemsProgressRow");
-const overlayItemsProgressFill = document.getElementById("overlayItemsProgressFill");
-const overlayItemsProgressLabel = document.getElementById("overlayItemsProgressLabel");
-const overlayItemsLogEl = document.getElementById("overlayItemsLog");
 
 const clipExportEventUrlInput = document.getElementById("clipExportEventUrl");
 const clipRowsEl = document.getElementById("clipRows");
@@ -246,15 +238,15 @@ async function startOverlayExport() {
     alert("Please enter an eBay Live event URL.");
     return;
   }
-  const listingId = overlayExportListingSelect.value;
-  if (!listingId) {
-    alert("Please load auctions and select which one to export.");
+  const titleQuery = overlayExportTitleQueryInput.value.trim();
+  if (!titleQuery) {
+    alert("Please enter the listing title to search for.");
     return;
   }
 
   const timeOffsetRaw = overlayExportTimeOffsetInput.value.trim();
   const timeScaleRaw = overlayExportTimeScaleInput.value.trim();
-  const body = { event_url: eventUrl, listing_id: listingId };
+  const body = { event_url: eventUrl, title_query: titleQuery };
   if (timeOffsetRaw !== "") body.time_offset = parseFloat(timeOffsetRaw);
   if (timeScaleRaw !== "") body.time_scale = parseFloat(timeScaleRaw);
 
@@ -417,7 +409,6 @@ function makeLogRenderer(el) {
 
 const renderMainLog = makeLogRenderer(logEl);
 const renderOverlayExportLog = makeLogRenderer(overlayExportLogEl);
-const renderOverlayItemsLog = makeLogRenderer(overlayItemsLogEl);
 const renderClipExportLog = makeLogRenderer(clipExportLogEl);
 
 function escapeHtml(str) {
@@ -553,8 +544,7 @@ function renderOverlayExport(exportState) {
     overlayExportDownloadRow.classList.add("hidden");
   }
 
-  overlayExportIsRunning = exportState.running;
-  updateOverlayExportButtonEnabled();
+  overlayExportBtn.disabled = exportState.running;
   overlayExportStopBtn.disabled = !exportState.running;
   overlayExportClearBtn.disabled = exportState.running;
   renderOverlayExportLog(exportState.logs || []);
@@ -564,99 +554,6 @@ async function refreshOverlayExportStatus() {
   const res = await fetch("/api/overlay-export/status");
   const exportState = await res.json();
   renderOverlayExport(exportState);
-}
-
-let overlayExportIsRunning = false;
-
-function updateOverlayExportButtonEnabled() {
-  const hasSelection = !!overlayExportListingSelect.value && !overlayExportListingSelect.disabled;
-  overlayExportBtn.disabled = overlayExportIsRunning || !hasSelection;
-}
-
-function renderOverlayItems(itemsState) {
-  if (itemsState.status && itemsState.status !== "IDLE") {
-    overlayItemsStatusBadge.classList.remove("hidden");
-    overlayItemsStatusBadge.textContent = itemsState.status;
-    overlayItemsStatusBadge.className = "badge " + (BADGE_CLASSES[itemsState.status] || "badge-idle");
-  } else {
-    overlayItemsStatusBadge.classList.add("hidden");
-  }
-
-  if (itemsState.status === "RUNNING" && itemsState.progress !== null && itemsState.progress !== undefined) {
-    overlayItemsProgressRow.classList.remove("hidden");
-    const pct = itemsState.progress;
-    overlayItemsProgressFill.style.width = pct + "%";
-    overlayItemsProgressLabel.textContent = pct.toFixed(1) + "%";
-  } else {
-    overlayItemsProgressRow.classList.add("hidden");
-  }
-
-  overlayItemsLoadBtn.disabled = itemsState.running;
-  overlayItemsStopBtn.disabled = !itemsState.running;
-  renderOverlayItemsLog(itemsState.logs || []);
-
-  if (itemsState.status === "DONE" && itemsState.items && itemsState.items.length) {
-    const previousValue = overlayExportListingSelect.value;
-    overlayExportListingSelect.innerHTML = "";
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = `Select an auction (${itemsState.items.length} found)...`;
-    overlayExportListingSelect.appendChild(placeholder);
-    for (const item of itemsState.items) {
-      const option = document.createElement("option");
-      option.value = item.listing_id;
-      option.textContent = item.title;
-      overlayExportListingSelect.appendChild(option);
-    }
-    overlayExportListingSelect.disabled = false;
-    // Keep the previous selection if it's still in the freshly-loaded list
-    // (e.g. after reloading the same event), rather than resetting to the
-    // placeholder every time the status just happens to be polled again.
-    if (previousValue && itemsState.items.some((i) => String(i.listing_id) === previousValue)) {
-      overlayExportListingSelect.value = previousValue;
-    }
-  } else if (itemsState.status !== "RUNNING") {
-    overlayExportListingSelect.innerHTML = '<option value="">Load auctions first...</option>';
-    overlayExportListingSelect.disabled = true;
-  }
-
-  updateOverlayExportButtonEnabled();
-}
-
-async function refreshOverlayItemsStatus() {
-  const res = await fetch("/api/overlay-items/status");
-  const itemsState = await res.json();
-  renderOverlayItems(itemsState);
-}
-
-async function startOverlayItems() {
-  const eventUrl = overlayExportEventUrlInput.value.trim();
-  if (!eventUrl) {
-    alert("Please enter an eBay Live event URL.");
-    return;
-  }
-  const res = await fetch("/api/overlay-items", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ event_url: eventUrl }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    alert(body.detail || "Failed to start loading auctions.");
-    return;
-  }
-  renderOverlayItemsLog.reset();
-  refreshOverlayItemsStatus();
-}
-
-async function stopOverlayItems() {
-  const res = await fetch("/api/overlay-items/stop", { method: "POST" });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    alert(body.detail || "Failed to stop loading auctions.");
-    return;
-  }
-  refreshOverlayItemsStatus();
 }
 
 function renderClipResults(clipList) {
@@ -733,7 +630,6 @@ function startPolling() {
     refreshStatus();
     refreshQueueStatus();
     refreshOverlayExportStatus();
-    refreshOverlayItemsStatus();
     refreshClipExportStatus();
   }, 2000);
 }
@@ -752,9 +648,6 @@ clearQueueBtn.addEventListener("click", clearQueue);
 overlayExportBtn.addEventListener("click", startOverlayExport);
 overlayExportStopBtn.addEventListener("click", stopOverlayExport);
 overlayExportClearBtn.addEventListener("click", clearOverlayExport);
-overlayItemsLoadBtn.addEventListener("click", startOverlayItems);
-overlayItemsStopBtn.addEventListener("click", stopOverlayItems);
-overlayExportListingSelect.addEventListener("change", updateOverlayExportButtonEnabled);
 clipAddRowBtn.addEventListener("click", () => addClipRow());
 clipExportBtn.addEventListener("click", startClipExport);
 clipExportClearBtn.addEventListener("click", clearClipExport);
@@ -766,5 +659,4 @@ startPolling();
 refreshStatus();
 refreshQueueStatus();
 refreshOverlayExportStatus();
-refreshOverlayItemsStatus();
 refreshClipExportStatus();

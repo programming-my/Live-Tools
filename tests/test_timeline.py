@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from overlay.timeline import OverlayTimeline, build_auction_segments, find_listing_segment, list_distinct_listings
+from overlay.timeline import OverlayTimeline, build_auction_segments, find_complete_segment_by_title, find_listing_segment
 
 START_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -98,22 +98,56 @@ def test_find_listing_segment_prefers_the_occurrence_with_real_bids():
     assert any("pinned 2 separate times" in msg for msg in logs)
 
 
-def test_list_distinct_listings_dedupes_and_orders_chronologically():
-    """A dropdown of items shouldn't show the same listing twice just
-    because it was pinned more than once, and should list items in the
-    order they actually appeared in the event."""
-    item_a_flicker = {"listing_id": "111", "title": "Item A", "pinned_offset": 0, "unpinned_offset": 5, "bids": []}
-    item_b = {"listing_id": "222", "title": "Item B", "pinned_offset": 50, "unpinned_offset": 100, "bids": [{"amount": 1}]}
-    item_a_real = {"listing_id": "111", "title": "Item A", "pinned_offset": 200, "unpinned_offset": 260, "bids": [{"amount": 1}, {"amount": 2}]}
-    timeline = OverlayTimeline(auctions=[item_a_flicker, item_b, item_a_real], viewers=[])
-
-    items = list_distinct_listings(timeline)
-
-    assert [i["listing_id"] for i in items] == ["111", "222"]
-    assert items[0]["title"] == "Item A"
+def _pin_event(offset: float, listing_id: str, pinned: bool, title: str = None, start_dt: datetime = None) -> dict:
+    start_dt = start_dt or START_DT
+    listing = {"listingId": listing_id, "isPinnedInEvent": pinned}
+    if pinned:
+        listing["title"] = title
+    return {
+        "serverCreatedAt": int((start_dt.timestamp() + offset) * 1000),
+        "eventListings": [listing],
+    }
 
 
-def test_list_distinct_listings_falls_back_to_placeholder_title():
-    timeline = OverlayTimeline(auctions=[{"listing_id": "111", "title": None, "pinned_offset": 0, "unpinned_offset": 10, "bids": []}], viewers=[])
-    items = list_distinct_listings(timeline)
-    assert items == [{"listing_id": "111", "title": "Item 111"}]
+def test_find_complete_segment_by_title_requires_both_pin_and_unpin():
+    """A listing that's only been pinned so far (no matching unpin event
+    yet seen) must NOT match, even if its title matches - its real bounds
+    aren't known yet, so stopping here would be premature (the whole point
+    of "complete" is to avoid that)."""
+    pin_events = [_pin_event(0, "111", True, title="Vintage Watch")]
+    assert find_complete_segment_by_title(pin_events, "watch", START_DT) is None
+
+
+def test_find_complete_segment_by_title_matches_case_insensitive_substring():
+    pin_events = [
+        _pin_event(0, "111", True, title="Vintage Rolex Watch"),
+        _pin_event(10, "111", False),
+    ]
+    found = find_complete_segment_by_title(pin_events, "ROLEX", START_DT)
+    assert found is not None
+    assert found["listing_id"] == "111"
+
+
+def test_find_complete_segment_by_title_returns_none_when_nothing_matches():
+    pin_events = [
+        _pin_event(0, "111", True, title="Vintage Watch"),
+        _pin_event(10, "111", False),
+    ]
+    assert find_complete_segment_by_title(pin_events, "coin", START_DT) is None
+
+
+def test_find_complete_segment_by_title_prefers_the_longer_match_when_tied_on_bids():
+    """Two different completed listings both match the query (a common
+    word in both titles, e.g. two "Vintage Coin" lots) - pick one via the
+    same ranking find_listing_segment uses. At this stage (pin segments
+    only, before any bid events are attached - see build_auction_segments)
+    bid counts are always 0, so the tie-break in practice comes down to
+    which pinned segment lasted longer."""
+    pin_events = [
+        _pin_event(0, "111", True, title="Vintage Coin A"),
+        _pin_event(10, "111", False),  # 10s pinned
+        _pin_event(20, "222", True, title="Vintage Coin B"),
+        _pin_event(90, "222", False),  # 70s pinned - longer
+    ]
+    found = find_complete_segment_by_title(pin_events, "coin", START_DT)
+    assert found["listing_id"] == "222"

@@ -115,54 +115,24 @@
     <h2>Export Auction Overlay</h2>
     <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
       Extracts one auction into its own short video file with blue background for editors
-      to use. Paste an event URL, load its auctions, then pick which one to export by title.
+      to use. Paste an event URL and the listing's title (or part of it) - it searches for
+      that auction and exports just its own clip, not the whole event.
     </p>
 
     <div class="card">
       <label for="overlayExportEventUrl">eBay Live event URL</label>
       <input id="overlayExportEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
 
-      <div class="actions">
-        <button id="overlayItemsLoadBtn" class="secondary" type="button">Load auctions</button>
-      </div>
-    </div>
+      <label for="overlayExportTitleQuery">Listing title</label>
+      <input id="overlayExportTitleQuery" type="text" placeholder="e.g. Vintage Rolex Watch" />
 
-    <div class="card">
-      <div class="status-row">
-        <label style="margin: 0;">Load status</label>
-        <span id="overlayItemsStatusBadge" class="badge badge-idle hidden">IDLE</span>
-        <button id="overlayItemsStopBtn" class="secondary" disabled>Stop</button>
-      </div>
-
-      <div id="overlayItemsProgressRow" class="hidden">
-        <label>Load progress</label>
-        <div class="progress-bar">
-          <div id="overlayItemsProgressFill" class="progress-fill" style="width: 0%"></div>
-        </div>
-        <span id="overlayItemsProgressLabel">0%</span>
-      </div>
-
-      <label for="overlayExportListingSelect">Auction to export</label>
-      <select id="overlayExportListingSelect" disabled>
-        <option value="">Load auctions first...</option>
-      </select>
-    </div>
-
-    <div class="card">
-      <details class="log-details">
-        <summary>Load log</summary>
-        <div id="overlayItemsLog" class="log"></div>
-      </details>
-    </div>
-
-    <div class="card">
       <div class="actions">
         <input id="overlayExportTimeOffset" type="number" step="0.1" placeholder="Time offset (s), auto" title="Seconds to add to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
         <input id="overlayExportTimeScale" type="number" step="0.0001" placeholder="Time scale, auto" title="Multiplier applied to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
       </div>
 
       <div class="actions">
-        <button id="overlayExportBtn" disabled>Export overlay</button>
+        <button id="overlayExportBtn">Export overlay</button>
       </div>
     </div>
 

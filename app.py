@@ -27,8 +27,7 @@ from download_queue import QueueState
 from live.auth import extract_event_id
 from live.session import EventSession
 from monitor import check_event_status, download_replay_with_progress, fetch_event_start_date, monitor_loop
-from overlay.pipeline import build_chroma_key_overlay_video, build_standalone_chroma_key_overlay_video, fetch_history_and_timeline
-from overlay.timeline import list_distinct_listings
+from overlay.pipeline import build_chroma_key_overlay_video, build_standalone_chroma_key_overlay_video
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -314,7 +313,7 @@ class OverlayExportState:
     def _reset_locked(self) -> None:
         self.filename: Optional[str] = None
         self.event_url: Optional[str] = None
-        self.listing_id: Optional[str] = None
+        self.title_query: Optional[str] = None
         self.status: str = "IDLE"
         # A troubled event's fetch phase (retries, orphaned-event warnings)
         # plus a long render phase can together produce several thousand
@@ -329,14 +328,14 @@ class OverlayExportState:
         self.time_scale: Optional[float] = None
 
     def reset(
-        self, filename: str, event_url: str, listing_id: str,
+        self, filename: str, event_url: str, title_query: str,
         time_offset: Optional[float] = None, time_scale: Optional[float] = None,
     ) -> None:
         with self.lock:
             self._reset_locked()
             self.filename = filename
             self.event_url = event_url
-            self.listing_id = listing_id
+            self.title_query = title_query
             self.status = "RUNNING"
             self.progress = 0
             self.time_offset = time_offset
@@ -375,7 +374,7 @@ class OverlayExportState:
             return {
                 "filename": self.filename,
                 "event_url": self.event_url,
-                "listing_id": self.listing_id,
+                "title_query": self.title_query,
                 "status": self.status,
                 "logs": list(self.logs),
                 "output_filename": self.output_filename,
@@ -461,107 +460,12 @@ class ClipExportState:
             }
 
 
-class OverlayItemsState:
-    """Tracks the single background job that fetches an event's full
-    auction/bid history just to list which items were pinned (by title),
-    for the overlay-export UI's "pick which auction to export" dropdown -
-    same single-slot pattern as OverlayExportState. The (history, timeline)
-    this produces is cached (see _timeline_cache) so a subsequent export of
-    any item from this same event reuses it instead of re-fetching."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.thread: Optional[threading.Thread] = None
-        self.stop_event: Optional[threading.Event] = None
-        self._reset_locked()
-
-    def _reset_locked(self) -> None:
-        self.event_url: Optional[str] = None
-        self.status: str = "IDLE"
-        self.logs: deque = deque(maxlen=5000)
-        self.progress: Optional[float] = None
-        self.items: list = []
-
-    def reset(self, event_url: str) -> None:
-        with self.lock:
-            self._reset_locked()
-            self.event_url = event_url
-            self.status = "RUNNING"
-            self.progress = 0
-
-    def is_running(self) -> bool:
-        return self.thread is not None and self.thread.is_alive()
-
-    def clear(self) -> None:
-        with self.lock:
-            self._reset_locked()
-
-    def log(self, message: str) -> None:
-        with self.lock:
-            self.logs.append({"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "msg": message})
-
-    def set_progress(self, percent: float) -> None:
-        with self.lock:
-            self.progress = percent
-
-    def set_done(self, items: list) -> None:
-        with self.lock:
-            self.status = "DONE"
-            self.items = items
-            self.progress = 100
-
-    def set_error(self) -> None:
-        with self.lock:
-            self.status = "ERROR"
-
-    def to_dict(self) -> dict:
-        with self.lock:
-            return {
-                "event_url": self.event_url,
-                "status": self.status,
-                "logs": list(self.logs),
-                "progress": self.progress,
-                "items": self.items,
-                "running": self.is_running(),
-            }
-
-
-class TimelineCache:
-    """Caches the (history, timeline) from the most recent successful
-    "load auctions" job (see OverlayItemsState), keyed by event_url, so
-    exporting several different items from the same event only pays for
-    the (potentially many-minutes-long, on a troubled event) fetch once.
-    Single-slot - a different event_url simply replaces it, same as every
-    other piece of state in this app."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.event_url: Optional[str] = None
-        self.history: Optional[dict] = None
-        self.timeline = None
-
-    def get(self, event_url: str) -> Optional[tuple]:
-        with self.lock:
-            if self.event_url == event_url and self.history is not None:
-                return self.history, self.timeline
-            return None
-
-    def set(self, event_url: str, history: dict, timeline) -> None:
-        with self.lock:
-            self.event_url = event_url
-            self.history = history
-            self.timeline = timeline
-
-
 state = JobState()
 queue_state = QueueState()
 overlay_export_state = OverlayExportState()
-overlay_items_state = OverlayItemsState()
 clip_export_state = ClipExportState()
-timeline_cache = TimelineCache()
 job_start_lock = threading.Lock()
 overlay_export_start_lock = threading.Lock()
-overlay_items_start_lock = threading.Lock()
 clip_export_start_lock = threading.Lock()
 
 # "Chat and Auction Monitor" - live overlay/chat sessions, keyed by event id.
@@ -584,13 +488,9 @@ class QueueAddRequest(BaseModel):
     url: str
 
 
-class OverlayItemsRequest(BaseModel):
-    event_url: str
-
-
 class OverlayExportRequest(BaseModel):
     event_url: str
-    listing_id: str
+    title_query: str
     time_offset: Optional[float] = None
     time_scale: Optional[float] = None
 
@@ -637,57 +537,8 @@ def _try_start_job(url: str, poll_interval: int, queue_item: Optional[dict] = No
         return True
 
 
-def _try_start_overlay_items(event_url: str) -> bool:
-    """Starts a "load auctions" job if the single slot is free - fetches
-    the event's full auction/bid history just to list which items were
-    pinned (by title), for the export UI's dropdown. Caches the (history,
-    timeline) this produces (see timeline_cache) so a subsequent export of
-    any item from this event reuses it instead of re-fetching. Returns
-    whether it started."""
-    with overlay_items_start_lock:
-        if overlay_items_state.is_running():
-            return False
-        overlay_items_state.reset(event_url)
-        stop_event = threading.Event()
-        overlay_items_state.stop_event = stop_event
-        thread = threading.Thread(target=_run_overlay_items, args=(event_url, stop_event), daemon=True)
-        overlay_items_state.thread = thread
-        thread.start()
-        return True
-
-
-def _run_overlay_items(event_url: str, stop_event: threading.Event) -> None:
-    def on_log(message: str) -> None:
-        overlay_items_state.log(message)
-
-    def should_stop() -> bool:
-        return stop_event.is_set()
-
-    try:
-        history, timeline = fetch_history_and_timeline(
-            event_url, on_log=on_log, on_progress=overlay_items_state.set_progress, should_stop=should_stop,
-        )
-        if should_stop():
-            on_log("Stopped by user.")
-            overlay_items_state.set_error()
-            return
-        items = list_distinct_listings(timeline)
-        if not items:
-            on_log("No pinned auctions found for this event.")
-            overlay_items_state.set_error()
-            return
-        timeline_cache.set(event_url, history, timeline)
-        on_log(f"Found {len(items)} auction(s).")
-        overlay_items_state.set_done(items)
-    except Exception as e:
-        overlay_items_state.log(f"Unexpected error: {e}")
-        overlay_items_state.set_error()
-    finally:
-        overlay_items_state.thread = None
-
-
 def _try_start_overlay_export(
-    filename: Optional[str], event_url: str, listing_id: str,
+    filename: Optional[str], event_url: str, title_query: str,
     time_offset: Optional[float] = None, time_scale: Optional[float] = None,
 ) -> bool:
     """Starts an overlay-export job if the single export slot is free. Returns
@@ -696,29 +547,30 @@ def _try_start_overlay_export(
     _find_download_for_event) - if None, the export instead renders directly
     from the event's own data with no source video (see
     build_standalone_chroma_key_overlay_video), and time_offset/time_scale
-    are ignored (there's nothing to calibrate against). Exports just
-    listing_id's own auction, not the whole event - the output filename
-    includes it so exporting a second item for the same event/replay gets
-    its own file instead of overwriting the first."""
+    are ignored (there's nothing to calibrate against). Exports just the
+    one auction matching title_query, not the whole event - the output
+    filename includes a slug of the query so exporting a second item for
+    the same event/replay gets its own file instead of overwriting the
+    first (the real listing_id isn't known until the search inside the job
+    itself finds it - see overlay.protocol.fetch_history_for_title)."""
     with overlay_export_start_lock:
         if overlay_export_state.is_running():
             return False
-        item_slug = re.sub(r"[^A-Za-z0-9_-]", "", listing_id) or "item"
+        title_slug = re.sub(r"[^A-Za-z0-9]+", "-", title_query.strip()).strip("-").lower()[:40] or "item"
         if filename:
             source_path = os.path.join(DOWNLOADS_DIR, filename)
             stem, _ext = os.path.splitext(filename)
-            output_path = os.path.join(DOWNLOADS_DIR, f"{stem}_overlay_item{item_slug}.mp4")
+            output_path = os.path.join(DOWNLOADS_DIR, f"{stem}_overlay_{title_slug}.mp4")
         else:
             source_path = None
             event_id = extract_event_id(event_url) or "event"
-            output_path = os.path.join(DOWNLOADS_DIR, f"overlay_{event_id}_item{item_slug}_{int(time.time())}.mp4")
-        overlay_export_state.reset(filename, event_url, listing_id, time_offset, time_scale)
+            output_path = os.path.join(DOWNLOADS_DIR, f"overlay_{event_id}_{title_slug}_{int(time.time())}.mp4")
+        overlay_export_state.reset(filename, event_url, title_query, time_offset, time_scale)
         stop_event = threading.Event()
         overlay_export_state.stop_event = stop_event
-        prefetched = timeline_cache.get(event_url)
         thread = threading.Thread(
             target=_run_overlay_export,
-            args=(event_url, source_path, output_path, listing_id, time_offset, time_scale, stop_event, prefetched),
+            args=(event_url, source_path, output_path, title_query, time_offset, time_scale, stop_event),
             daemon=True,
         )
         overlay_export_state.thread = thread
@@ -834,10 +686,9 @@ def _run_job(url: str, poll_interval: int, stop_event: threading.Event, queue_it
 
 
 def _run_overlay_export(
-    event_url: str, source_path: Optional[str], output_path: str, listing_id: str,
+    event_url: str, source_path: Optional[str], output_path: str, title_query: str,
     time_offset: Optional[float] = None, time_scale: Optional[float] = None,
     stop_event: Optional[threading.Event] = None,
-    prefetched: Optional[tuple] = None,
 ) -> None:
     def on_log(message: str) -> None:
         overlay_export_state.log(message)
@@ -848,16 +699,14 @@ def _run_overlay_export(
     try:
         if source_path is not None:
             success = build_chroma_key_overlay_video(
-                event_url, source_path, output_path, listing_id, on_log=on_log, on_progress=overlay_export_state.set_progress,
+                event_url, source_path, output_path, title_query, on_log=on_log, on_progress=overlay_export_state.set_progress,
                 time_offset_override=time_offset, time_scale_override=time_scale, should_stop=should_stop,
-                prefetched=prefetched,
             )
         else:
-            if prefetched is None:
-                on_log("No downloaded replay found for this event - rendering directly from the event's own data instead.")
+            on_log("No downloaded replay found for this event - rendering directly from the event's own data instead.")
             success = build_standalone_chroma_key_overlay_video(
-                event_url, output_path, listing_id, on_log=on_log, on_progress=overlay_export_state.set_progress,
-                should_stop=should_stop, prefetched=prefetched,
+                event_url, output_path, title_query, on_log=on_log, on_progress=overlay_export_state.set_progress,
+                should_stop=should_stop,
             )
 
         if success:
@@ -1191,54 +1040,21 @@ def remove_from_queue(item_id: str) -> dict:
     return queue_state.to_dict()
 
 
-@app.post("/api/overlay-items")
-def start_overlay_items(req: OverlayItemsRequest) -> dict:
-    parsed = urlparse(req.event_url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Please provide a valid http(s) event URL.")
-
-    started = _try_start_overlay_items(req.event_url)
-    if not started:
-        raise HTTPException(status_code=409, detail="Already loading auctions for an event. Wait for it to finish.")
-
-    return overlay_items_state.to_dict()
-
-
-@app.get("/api/overlay-items/status")
-def get_overlay_items_status() -> dict:
-    return overlay_items_state.to_dict()
-
-
-@app.post("/api/overlay-items/stop")
-def stop_overlay_items() -> dict:
-    if overlay_items_state.stop_event is not None:
-        overlay_items_state.stop_event.set()
-    return overlay_items_state.to_dict()
-
-
-@app.post("/api/overlay-items/clear")
-def clear_overlay_items() -> dict:
-    if overlay_items_state.is_running():
-        raise HTTPException(status_code=409, detail="Still loading auctions. Wait for it to finish before clearing.")
-    overlay_items_state.clear()
-    return overlay_items_state.to_dict()
-
-
 @app.post("/api/overlay-export")
 def start_overlay_export(req: OverlayExportRequest) -> dict:
     parsed = urlparse(req.event_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Please provide a valid http(s) event URL.")
 
-    listing_id = req.listing_id.strip()
-    if not listing_id:
-        raise HTTPException(status_code=400, detail="Please select which auction to export.")
+    title_query = req.title_query.strip()
+    if not title_query:
+        raise HTTPException(status_code=400, detail="Please enter the listing title to search for.")
 
     if req.time_scale is not None and req.time_scale <= 0:
         raise HTTPException(status_code=400, detail="time_scale must be positive.")
 
     filename = _find_download_for_event(req.event_url)
-    started = _try_start_overlay_export(filename, req.event_url, listing_id, req.time_offset, req.time_scale)
+    started = _try_start_overlay_export(filename, req.event_url, title_query, req.time_offset, req.time_scale)
     if not started:
         raise HTTPException(status_code=409, detail="An overlay export is already running. Wait for it to finish.")
 

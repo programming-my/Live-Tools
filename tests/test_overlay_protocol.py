@@ -609,3 +609,188 @@ def test_fetch_full_history_runs_both_categories_concurrently():
     # One category's worth of delay, not two - proves asyncio.gather is
     # actually running them concurrently rather than one after the other.
     assert elapsed < delay * 1.8
+
+
+def test_fetch_category_stops_pulling_new_work_once_stop_when_is_satisfied():
+    """This is the whole point of stop_when (see fetch_history_for_title):
+    once it reports a match has been found, workers must stop pulling
+    further NEW windows off the queue instead of working through the rest
+    of a multi-hour event regardless - with only a small, bounded overshoot
+    from whichever other windows were already in flight when it tripped."""
+    import overlay.protocol as protocol
+
+    calls = {"n": 0}
+
+    async def instant_success(*args, **kwargs):
+        calls["n"] += 1
+        return [{"seen": calls["n"]}], None
+
+    original = protocol._fetch_window
+    protocol._fetch_window = instant_success
+    try:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end = start + timedelta(hours=4)  # 160 windows at 90s each
+
+        def stop_after_three(messages_so_far):
+            return len(messages_so_far) >= 3
+
+        messages = asyncio.run(_fetch_category(
+            mux=None, common_headers={}, event_id="evt", message_types=["X"],
+            window_start=start, window_end=end, chunk_seconds=90,
+            on_log=lambda m: None, tracker=_FailureTracker(),
+            stop_when=stop_after_three,
+        ))
+    finally:
+        protocol._fetch_window = original
+
+    # Bounded well below the full ~160 windows a 4-hour event would have -
+    # some small overshoot from concurrently in-flight workers is expected
+    # and fine, grinding through the whole event is not.
+    assert len(messages) < 20
+
+
+def test_fetch_history_for_title_searches_pins_then_narrows_the_auction_fetch():
+    """Integration-level proof of fetch_history_for_title's own
+    orchestration: it should search pin/listing history for the title,
+    then fetch auction/bid events ONLY for that matched segment's own
+    narrow [pinned_offset, unpinned_offset) range - not the whole event -
+    and return matched_listing_id so the caller (overlay.pipeline) can
+    locate the same segment again via find_listing_segment after
+    build_timeline, reusing all of its existing clip-bounds logic
+    unchanged."""
+    import overlay.protocol as protocol
+    from overlay.protocol import AUCTION_MESSAGE_TYPES
+
+    class _FakeConnectCtx:
+        def __init__(self, ws):
+            self.ws = ws
+
+        async def __aenter__(self):
+            return self.ws
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _HandshakeThenBlockWS:
+        def __init__(self):
+            self._queue: asyncio.Queue = asyncio.Queue()
+            self._recv_count = 0
+
+        async def send(self, data):
+            pass
+
+        async def recv(self):
+            self._recv_count += 1
+            if self._recv_count == 1:
+                return "CONNECTED\n\n"
+            return await self._queue.get()
+
+    start_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def _pin_event(offset, listing_id, pinned, title=None):
+        listing = {"listingId": listing_id, "isPinnedInEvent": pinned}
+        if pinned:
+            listing["title"] = title
+        return {"serverCreatedAt": int((start_dt.timestamp() + offset) * 1000), "eventListings": [listing]}
+
+    pin_events = [
+        _pin_event(1000.0, "111", True, title="Common Item"),
+        _pin_event(1050.0, "111", False),
+        _pin_event(2000.0, "222", True, title="Rare Gold Coin"),
+        _pin_event(2300.0, "222", False),
+    ]
+    fake_auction_events = [{"typename": "AuctionNewBidLeader", "listingId": "222"}]
+    seen_auction_window = {}
+
+    async def fake_fetch_category(mux, common_headers, event_id, message_types, window_start, window_end, *args, **kwargs):
+        if message_types == ["EventListingsUpdated"]:
+            # Positional args after window_end: chunk_seconds, on_log,
+            # tracker, should_stop, on_progress, lost_ranges, semaphore,
+            # stop_when - simulate the real _fetch_category calling
+            # stop_when once the (fake, instant) scan has "found" the match.
+            stop_when = args[7] if len(args) > 7 else None
+            if stop_when is not None:
+                stop_when(pin_events)
+            return pin_events
+        if message_types == AUCTION_MESSAGE_TYPES:
+            seen_auction_window["start"] = window_start
+            seen_auction_window["end"] = window_end
+            return fake_auction_events
+        return []
+
+    original_bootstrap = protocol.bootstrap_session
+    original_connect = protocol.websockets.connect
+    original_fetch_category = protocol._fetch_category
+
+    protocol.bootstrap_session = lambda event_url: {
+        "event_id": "evt", "token": "tok", "guid": "g",
+        "start_time": start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "end_time": None,
+    }
+    protocol.websockets.connect = lambda *a, **k: _FakeConnectCtx(_HandshakeThenBlockWS())
+    protocol._fetch_category = fake_fetch_category
+    try:
+        result = protocol.fetch_history_for_title("https://www.ebay.com/ebaylive/events/evt/stream", "rare gold")
+    finally:
+        protocol.bootstrap_session = original_bootstrap
+        protocol.websockets.connect = original_connect
+        protocol._fetch_category = original_fetch_category
+
+    assert result is not None
+    assert result["matched_listing_id"] == "222"
+    assert result["auctions"] == fake_auction_events
+    # The auction fetch must be scoped to the matched segment's own narrow
+    # window (2000s..2300s), not the whole event.
+    assert seen_auction_window["start"] == start_dt + timedelta(seconds=2000.0)
+    assert seen_auction_window["end"] == start_dt + timedelta(seconds=2300.0)
+
+
+def test_fetch_history_for_title_returns_none_when_nothing_matches():
+    import overlay.protocol as protocol
+
+    class _FakeConnectCtx:
+        def __init__(self, ws):
+            self.ws = ws
+
+        async def __aenter__(self):
+            return self.ws
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _HandshakeThenBlockWS:
+        def __init__(self):
+            self._queue: asyncio.Queue = asyncio.Queue()
+            self._recv_count = 0
+
+        async def send(self, data):
+            pass
+
+        async def recv(self):
+            self._recv_count += 1
+            if self._recv_count == 1:
+                return "CONNECTED\n\n"
+            return await self._queue.get()
+
+    start_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    async def fake_fetch_category_no_match(mux, common_headers, event_id, message_types, *args, **kwargs):
+        return []
+
+    original_bootstrap = protocol.bootstrap_session
+    original_connect = protocol.websockets.connect
+    original_fetch_category = protocol._fetch_category
+
+    protocol.bootstrap_session = lambda event_url: {
+        "event_id": "evt", "token": "tok", "guid": "g",
+        "start_time": start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "end_time": None,
+    }
+    protocol.websockets.connect = lambda *a, **k: _FakeConnectCtx(_HandshakeThenBlockWS())
+    protocol._fetch_category = fake_fetch_category_no_match
+    try:
+        result = protocol.fetch_history_for_title("https://www.ebay.com/ebaylive/events/evt/stream", "nonexistent item")
+    finally:
+        protocol.bootstrap_session = original_bootstrap
+        protocol.websockets.connect = original_connect
+        protocol._fetch_category = original_fetch_category
+
+    assert result is None

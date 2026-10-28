@@ -63,10 +63,10 @@ after another, instead of babysitting a single event at a time.
 
 ### Export Auction Overlay
 Extracts one specific auction into its own short video file with a blue
-background, for editors to key against. Paste an event URL, click **Load
-auctions** to fetch the event's auction history once, then pick which item
-to export from the dropdown by its listing title - exporting a different
-item afterward reuses that same fetch instead of re-fetching, e.g. with
+background, for editors to key against. Paste an event URL and the listing's
+title (or part of it) - it searches the event's pin/listing history for a
+match, stopping as soon as it finds one rather than scanning the whole event
+first, then fetches and renders just that auction's own clip, e.g. with
 custom calibration. Works even for an event you never downloaded a replay
 of, rendering directly from the event's own data instead (calibration
 fields are ignored in that case).

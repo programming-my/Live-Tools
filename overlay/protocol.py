@@ -515,20 +515,34 @@ async def _fetch_category(
     on_progress: Optional[Callable[[float], None]] = None,
     lost_ranges: Optional[list] = None,
     semaphore: Optional[asyncio.Semaphore] = None,
+    stop_when: Optional[Callable[[list], bool]] = None,
 ) -> list:
-    """Fetches one category across the full duration. Every chunk_seconds-
-    sized window gets its own concurrent task (bounded by `semaphore` - see
-    MAX_CONCURRENT_WINDOWS) that handles that window's entire lifecycle -
-    its first attempt, and if that fails, the full recursive-split +
-    backoff-retry + padded-retry recovery (see
-    _fetch_one_window_with_recovery) - rather than one window at a time
-    for the whole category. A window stuck deep in its own recovery holds
-    onto its one semaphore slot for as long as that takes, but the other
-    (typically healthy) windows aren't blocked waiting on it.
+    """Fetches one category across the full duration, via persistent worker
+    tasks pulling chunk_seconds-sized windows off a shared queue - rather
+    than one window at a time for the whole category. Each worker handles
+    a window's entire lifecycle itself - its first attempt, and if that
+    fails, the full recursive-split + backoff-retry + padded-retry recovery
+    (see _fetch_one_window_with_recovery). A worker stuck deep in one
+    window's recovery isn't pulling new work meanwhile, but the other
+    (typically healthy) workers keep going.
+
+    How many windows actually fetch at once is bounded by `semaphore` (see
+    MAX_CONCURRENT_WINDOWS), not by the worker count itself - the worker
+    count just controls how many pull from the queue concurrently, while
+    `semaphore` is what two categories running together (see
+    fetch_full_history) share to cap their *combined* concurrent fetches.
 
     Stops early (returning whatever was gathered so far) if `tracker` has
-    recorded too many failures (see MAX_CONSECUTIVE_WINDOW_FAILURES) or
-    `should_stop` reports the job was cancelled.
+    recorded too many failures (see MAX_CONSECUTIVE_WINDOW_FAILURES),
+    `should_stop` reports the job was cancelled, or - the reason this is a
+    worker pool pulling from a queue rather than every window launched
+    upfront - `stop_when`, if given, returns True once called with the
+    messages gathered so far: workers then stop pulling further NEW
+    windows (already in-flight ones still finish naturally) instead of
+    working through the rest of the queue regardless. Used by
+    fetch_history_for_title to stop scanning pin/listing history the
+    moment a title match is found, rather than needing the whole event's
+    pin history first.
 
     on_progress, if given, is called with a 0.0-1.0 fraction of this
     category's total duration *fully resolved* so far (a window counts
@@ -536,40 +550,53 @@ async def _fetch_category(
     slice of progress is delayed until then, but every other concurrently-
     completing window keeps the bar moving in the meantime.
     """
-    if semaphore is None:
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_WINDOWS)
-
     total_seconds = (window_end - window_start).total_seconds() or 1.0
-    boundaries = []
+    boundaries: list = []
     cursor = window_start
     while cursor < window_end:
         end = min(cursor + timedelta(seconds=chunk_seconds), window_end)
         boundaries.append((cursor, end))
         cursor = end
 
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_WINDOWS)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for boundary in boundaries:
+        queue.put_nowait(boundary)
+
+    all_messages: list = []
     completed_seconds = 0.0
+    found = False
 
     def report_progress() -> None:
         if on_progress is not None:
             on_progress(min(max(completed_seconds / total_seconds, 0.0), 1.0))
 
-    async def fetch_one(start: datetime, end: datetime) -> list:
-        nonlocal completed_seconds
-        async with semaphore:
-            if tracker.aborted or (should_stop is not None and should_stop()):
-                return []
-            messages = await _fetch_one_window_with_recovery(
-                mux, common_headers, event_id, message_types, start, end, chunk_seconds,
-                on_log, tracker, should_stop, lost_ranges,
-            )
+    async def worker() -> None:
+        nonlocal completed_seconds, found
+        while True:
+            if found or tracker.aborted or (should_stop is not None and should_stop()):
+                return
+            try:
+                start, end = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            async with semaphore:
+                messages = await _fetch_one_window_with_recovery(
+                    mux, common_headers, event_id, message_types, start, end, chunk_seconds,
+                    on_log, tracker, should_stop, lost_ranges,
+                )
+            all_messages.extend(messages)
             completed_seconds += (end - start).total_seconds()
             report_progress()
-            return messages
+            if stop_when is not None and stop_when(all_messages):
+                found = True
+                return
 
-    tasks = [asyncio.ensure_future(fetch_one(start, end)) for start, end in boundaries]
-    all_messages: list = []
-    for task in asyncio.as_completed(tasks):
-        all_messages.extend(await task)
+    num_workers = min(MAX_CONCURRENT_WINDOWS, len(boundaries)) or 1
+    workers = [asyncio.ensure_future(worker()) for _ in range(num_workers)]
+    await asyncio.gather(*workers)
 
     if should_stop is not None and should_stop():
         on_log("Stopped by user.")
@@ -761,6 +788,129 @@ def fetch_full_history(
         "viewer_stats": viewer_stats,
         "lost_ranges": [(a.isoformat(), b.isoformat()) for a, b in lost_ranges],
     }
+
+
+def fetch_history_for_title(
+    event_url: str,
+    title_query: str,
+    on_log: Optional[Callable[[str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
+) -> Optional[dict]:
+    """
+    Like fetch_full_history, but targeted at exactly one auction by its
+    listing title instead of the whole event - much faster when the match
+    isn't near the very end of the event, since it never needs the whole
+    event's data: scans pin/listing history only until a *complete* title
+    match is found (see timeline.find_complete_segment_by_title), stopping
+    there rather than continuing through the rest of the event (see
+    _fetch_category's stop_when), then fetches auction/bid events only for
+    that matched segment's own narrow time range - not the whole event's.
+
+    Same cost as fetch_full_history in the worst case (title not found at
+    all, or it's the very last thing pinned) - nothing can be known about
+    where a title falls without having looked for it.
+
+    Returns a history dict in the same shape fetch_full_history returns
+    (plus "matched_listing_id", the title match's own listing_id, for
+    overlay.timeline.find_listing_segment to locate it again after
+    build_timeline), or None if no match was found anywhere in the event.
+    """
+    from .timeline import find_complete_segment_by_title  # local: timeline imports fetch_listing_title from here
+
+    log = on_log or (lambda msg: None)
+    tracker = _FailureTracker()
+    on_progress = _monotonic_progress(on_progress)
+
+    log("Bootstrapping session (loading event page for auth token)...")
+    session = bootstrap_session(event_url)
+    event_id = session["event_id"]
+    start_dt = _parse_iso(session["start_time"])
+    end_dt = _parse_iso(session["end_time"]) if session["end_time"] else datetime.now(timezone.utc)
+    log(f"Event window: {start_dt.isoformat()} .. {end_dt.isoformat()}")
+
+    async def _heartbeat_loop(mux: _Multiplexer, interval=8):
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                await mux.send_raw("\n")
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def _run() -> Optional[dict]:
+        matched_segment: dict = {"value": None}
+        pin_updates_scanned: list = []
+
+        def stop_when(messages_so_far: list) -> bool:
+            segment = find_complete_segment_by_title(messages_so_far, title_query, start_dt)
+            if segment is not None:
+                matched_segment["value"] = segment
+                return True
+            return False
+
+        try:
+            async with websockets.connect(WS_URL, subprotocols=["v10.stomp", "v11.stomp", "v12.stomp"], ping_interval=None) as ws:
+                common_headers = {
+                    "X-EBAY-C-TRACKING": f"guid={session['guid']},pageId=0",
+                    "X-EBAY-C-MARKETPLACE-ID": "EBAY-US",
+                    "Accept-Language": "en-US",
+                    "Authorization": session["token"],
+                }
+                await ws.send(_stomp_frame("CONNECT", {**common_headers, "accept-version": "1.2", "heart-beat": "10000,10000"}))
+                await ws.recv()
+                await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-0", "destination": f"/clients/{session['guid']}"}))
+                await ws.send(_stomp_frame("SUBSCRIBE", {**common_headers, "id": "sub-1", "destination": f"/liveevents/{event_id}"}))
+
+                mux = _Multiplexer(ws)
+                mux.start()
+                heartbeat_task = asyncio.create_task(_heartbeat_loop(mux))
+                try:
+                    log(f"Searching pin/listing history for a title matching \"{title_query}\"...")
+                    pin_updates_scanned = await _fetch_category(
+                        mux, common_headers, event_id, ["EventListingsUpdated"], start_dt, end_dt, DEFAULT_CHUNK_SECONDS,
+                        log, tracker, should_stop,
+                        (lambda frac: on_progress(frac * 0.6)) if on_progress is not None else None,
+                        None, None, stop_when,
+                    )
+                    segment = matched_segment["value"]
+                    if segment is None:
+                        log(f"No auction found with a title matching \"{title_query}\" after scanning the whole event.")
+                        return None
+                    log(
+                        f"Found \"{segment['title']}\" ({segment['pinned_offset']:.0f}s..{segment['unpinned_offset']:.0f}s "
+                        "into the event) - fetching just its auction/bid events..."
+                    )
+
+                    seg_start = start_dt + timedelta(seconds=segment["pinned_offset"])
+                    seg_end = start_dt + timedelta(seconds=segment["unpinned_offset"])
+                    auctions = await _fetch_category(
+                        mux, common_headers, event_id, AUCTION_MESSAGE_TYPES, seg_start, seg_end, DEFAULT_CHUNK_SECONDS,
+                        log, tracker, should_stop,
+                        (lambda frac: on_progress(0.6 + frac * 0.4)) if on_progress is not None else None,
+                    )
+                    log(f"Fetched {len(auctions)} auction/bid event(s) for the matched listing.")
+                    if on_progress is not None:
+                        on_progress(1.0)
+                    return {
+                        "event_id": event_id,
+                        "start_time": session["start_time"],
+                        "end_time": session["end_time"],
+                        "auctions": auctions,
+                        "pin_updates": pin_updates_scanned,
+                        "viewer_stats": [],
+                        "lost_ranges": [],
+                        "matched_listing_id": segment["listing_id"],
+                    }
+                finally:
+                    heartbeat_task.cancel()
+                    await mux.stop()
+        except websockets.ConnectionClosed as e:
+            log(f"The sharing connection closed unexpectedly ({e!r}).")
+            return None
+
+    return asyncio.run(_run())
 
 
 def fetch_listing_title(listing_id: str, cache: Optional[dict] = None) -> str:
