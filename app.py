@@ -217,7 +217,11 @@ def _find_download_for_event(event_url: str) -> Optional[str]:
     matches = []
     for root, _dirs, names in os.walk(DOWNLOADS_DIR):
         for name in names:
-            if not name.lower().endswith(".mp4") or name.endswith("_overlay.mp4"):
+            # "_overlay.mp4"/"_overlay_item<N>.mp4" (see
+            # _try_start_overlay_export) are this feature's own outputs, not
+            # replay downloads - skip them regardless of which item's export
+            # produced them.
+            if not name.lower().endswith(".mp4") or "_overlay" in name.lower():
                 continue
             relative_path = os.path.relpath(os.path.join(root, name), DOWNLOADS_DIR)
             sidecar = _load_sidecar(relative_path)
@@ -249,23 +253,29 @@ def _move_into_dated_folder(source_path: str, output_path: str) -> tuple[str, st
     overlay video together in downloads/{stream date}/ rather than leaving
     them flat alongside every other download. Also brings the source's
     sidecar JSON along so it stays next to its video. Returns the new
-    (source_path, output_path), unchanged if already in the target folder
-    (idempotent - re-exporting the same file again is a no-op move).
+    (source_path, output_path). Each half is only moved if it isn't already
+    in the target folder - the source may already be there from an earlier
+    export of a different item against this same replay (each gets its own
+    output filename - see _try_start_overlay_export - but shares one
+    source), in which case only the new output still needs moving.
     """
     date_folder = os.path.join(DOWNLOADS_DIR, _derive_stream_date(source_path))
-    if os.path.dirname(source_path) == date_folder:
-        return source_path, output_path
-
     os.makedirs(date_folder, exist_ok=True)
 
-    sidecar_src = source_path + ".json"
-    new_source_path = os.path.join(date_folder, os.path.basename(source_path))
-    new_output_path = os.path.join(date_folder, os.path.basename(output_path))
+    if os.path.dirname(source_path) == date_folder:
+        new_source_path = source_path
+    else:
+        sidecar_src = source_path + ".json"
+        new_source_path = os.path.join(date_folder, os.path.basename(source_path))
+        shutil.move(source_path, new_source_path)
+        if os.path.exists(sidecar_src):
+            shutil.move(sidecar_src, new_source_path + ".json")
 
-    shutil.move(source_path, new_source_path)
-    if os.path.exists(sidecar_src):
-        shutil.move(sidecar_src, new_source_path + ".json")
-    shutil.move(output_path, new_output_path)
+    if os.path.dirname(output_path) == date_folder:
+        new_output_path = output_path
+    else:
+        new_output_path = os.path.join(date_folder, os.path.basename(output_path))
+        shutil.move(output_path, new_output_path)
 
     return new_source_path, new_output_path
 
@@ -303,6 +313,7 @@ class OverlayExportState:
     def _reset_locked(self) -> None:
         self.filename: Optional[str] = None
         self.event_url: Optional[str] = None
+        self.listing_id: Optional[str] = None
         self.status: str = "IDLE"
         # A troubled event's fetch phase (retries, orphaned-event warnings)
         # plus a long render phase can together produce several thousand
@@ -316,11 +327,15 @@ class OverlayExportState:
         self.time_offset: Optional[float] = None
         self.time_scale: Optional[float] = None
 
-    def reset(self, filename: str, event_url: str, time_offset: Optional[float] = None, time_scale: Optional[float] = None) -> None:
+    def reset(
+        self, filename: str, event_url: str, listing_id: str,
+        time_offset: Optional[float] = None, time_scale: Optional[float] = None,
+    ) -> None:
         with self.lock:
             self._reset_locked()
             self.filename = filename
             self.event_url = event_url
+            self.listing_id = listing_id
             self.status = "RUNNING"
             self.progress = 0
             self.time_offset = time_offset
@@ -359,6 +374,7 @@ class OverlayExportState:
             return {
                 "filename": self.filename,
                 "event_url": self.event_url,
+                "listing_id": self.listing_id,
                 "status": self.status,
                 "logs": list(self.logs),
                 "output_filename": self.output_filename,
@@ -474,6 +490,7 @@ class QueueAddRequest(BaseModel):
 
 class OverlayExportRequest(BaseModel):
     event_url: str
+    listing_id: str
     time_offset: Optional[float] = None
     time_scale: Optional[float] = None
 
@@ -521,7 +538,7 @@ def _try_start_job(url: str, poll_interval: int, queue_item: Optional[dict] = No
 
 
 def _try_start_overlay_export(
-    filename: Optional[str], event_url: str,
+    filename: Optional[str], event_url: str, listing_id: str,
     time_offset: Optional[float] = None, time_scale: Optional[float] = None,
 ) -> bool:
     """Starts an overlay-export job if the single export slot is free. Returns
@@ -530,23 +547,27 @@ def _try_start_overlay_export(
     _find_download_for_event) - if None, the export instead renders directly
     from the event's own data with no source video (see
     build_standalone_chroma_key_overlay_video), and time_offset/time_scale
-    are ignored (there's nothing to calibrate against)."""
+    are ignored (there's nothing to calibrate against). Exports just
+    listing_id's own auction, not the whole event - the output filename
+    includes it so exporting a second item for the same event/replay gets
+    its own file instead of overwriting the first."""
     with overlay_export_start_lock:
         if overlay_export_state.is_running():
             return False
+        item_slug = re.sub(r"[^A-Za-z0-9_-]", "", listing_id) or "item"
         if filename:
             source_path = os.path.join(DOWNLOADS_DIR, filename)
             stem, _ext = os.path.splitext(filename)
-            output_path = os.path.join(DOWNLOADS_DIR, f"{stem}_overlay.mp4")
+            output_path = os.path.join(DOWNLOADS_DIR, f"{stem}_overlay_item{item_slug}.mp4")
         else:
             source_path = None
             event_id = extract_event_id(event_url) or "event"
-            output_path = os.path.join(DOWNLOADS_DIR, f"overlay_{event_id}_{int(time.time())}.mp4")
-        overlay_export_state.reset(filename, event_url, time_offset, time_scale)
+            output_path = os.path.join(DOWNLOADS_DIR, f"overlay_{event_id}_item{item_slug}_{int(time.time())}.mp4")
+        overlay_export_state.reset(filename, event_url, listing_id, time_offset, time_scale)
         stop_event = threading.Event()
         overlay_export_state.stop_event = stop_event
         thread = threading.Thread(
-            target=_run_overlay_export, args=(event_url, source_path, output_path, time_offset, time_scale, stop_event), daemon=True,
+            target=_run_overlay_export, args=(event_url, source_path, output_path, listing_id, time_offset, time_scale, stop_event), daemon=True,
         )
         overlay_export_state.thread = thread
         thread.start()
@@ -661,7 +682,7 @@ def _run_job(url: str, poll_interval: int, stop_event: threading.Event, queue_it
 
 
 def _run_overlay_export(
-    event_url: str, source_path: Optional[str], output_path: str,
+    event_url: str, source_path: Optional[str], output_path: str, listing_id: str,
     time_offset: Optional[float] = None, time_scale: Optional[float] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> None:
@@ -674,13 +695,13 @@ def _run_overlay_export(
     try:
         if source_path is not None:
             success = build_chroma_key_overlay_video(
-                event_url, source_path, output_path, on_log=on_log, on_progress=overlay_export_state.set_progress,
+                event_url, source_path, output_path, listing_id, on_log=on_log, on_progress=overlay_export_state.set_progress,
                 time_offset_override=time_offset, time_scale_override=time_scale, should_stop=should_stop,
             )
         else:
             on_log("No downloaded replay found for this event - rendering directly from the event's own data instead.")
             success = build_standalone_chroma_key_overlay_video(
-                event_url, output_path, on_log=on_log, on_progress=overlay_export_state.set_progress,
+                event_url, output_path, listing_id, on_log=on_log, on_progress=overlay_export_state.set_progress,
                 should_stop=should_stop,
             )
 
@@ -1021,11 +1042,15 @@ def start_overlay_export(req: OverlayExportRequest) -> dict:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Please provide a valid http(s) event URL.")
 
+    listing_id = req.listing_id.strip()
+    if not listing_id:
+        raise HTTPException(status_code=400, detail="Please provide the item number to export.")
+
     if req.time_scale is not None and req.time_scale <= 0:
         raise HTTPException(status_code=400, detail="time_scale must be positive.")
 
     filename = _find_download_for_event(req.event_url)
-    started = _try_start_overlay_export(filename, req.event_url, req.time_offset, req.time_scale)
+    started = _try_start_overlay_export(filename, req.event_url, listing_id, req.time_offset, req.time_scale)
     if not started:
         raise HTTPException(status_code=409, detail="An overlay export is already running. Wait for it to finish.")
 

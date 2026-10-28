@@ -5,10 +5,10 @@ import tempfile
 from datetime import datetime
 from typing import Callable, Optional
 
-from .compose import composite_overlay, export_chroma_key_overlay, probe_video
+from .compose import export_chroma_key_overlay, probe_video
 from .protocol import fetch_full_history
 from .render import render_frames
-from .timeline import build_timeline
+from .timeline import build_timeline, find_listing_segment
 
 DEFAULT_FPS = 1
 DEFAULT_WORKERS = 10
@@ -22,9 +22,44 @@ TIMELINE_DONE_PCT = 10
 RENDER_DONE_PCT = 70
 COMPOSITE_DONE_PCT = 100
 
+# Extra seconds rendered before the listing's own pinned_offset and after its
+# unpinned_offset, so the card's pin/unpin transition isn't cut off at frame
+# zero or the very last frame.
+ITEM_CLIP_PADDING_SECONDS = 2.0
+
 RENDER_PROGRESS_PATTERN = re.compile(r"Rendered (\d+)/(\d+) frames\.$")
-COMPOSITE_PROGRESS_PATTERN = re.compile(r"Compositing progress: ([\d.]+)%")
 EXPORT_PROGRESS_PATTERN = re.compile(r"Export progress: ([\d.]+)%")
+
+
+def _clip_bounds_for_listing(
+    timeline, listing_id: str, real_duration_seconds: float, video_duration_seconds: float,
+    time_offset: float, time_scale: float, log: Callable[[str], None],
+) -> Optional[tuple]:
+    """Finds listing_id's segment and converts its [pinned_offset,
+    unpinned_offset) - in real-event-seconds, like everything in the
+    timeline - into the (start, end) *video*-second range render_frames
+    actually needs, inverting the same time_offset/time_scale mapping
+    render_frames itself applies the other way (real = offset + video*scale).
+    For the standalone pipeline (time_offset=0, time_scale=1) this is a
+    no-op passthrough. Returns None (after logging why) if nothing usable
+    was found."""
+    segment = find_listing_segment(timeline, listing_id, on_log=log)
+    if segment is None:
+        return None
+
+    unpinned = segment.get("unpinned_offset")
+    real_end = unpinned if unpinned is not None else real_duration_seconds
+    real_start = max(0.0, segment["pinned_offset"] - ITEM_CLIP_PADDING_SECONDS)
+    real_end = min(real_duration_seconds, real_end + ITEM_CLIP_PADDING_SECONDS)
+
+    video_start = max(0.0, (real_start - time_offset) / time_scale)
+    video_end = min(video_duration_seconds, (real_end - time_offset) / time_scale)
+    if video_end <= video_start:
+        log(f"Item number {listing_id}'s matched segment doesn't land inside the available video - nothing to export.")
+        return None
+
+    log(f"Exporting item {listing_id} (\"{segment['title']}\"): {video_start:.1f}s..{video_end:.1f}s ({video_end - video_start:.1f}s) of the source.")
+    return video_start, video_end
 
 
 def _fetch_and_calibrate(
@@ -94,81 +129,19 @@ def _fetch_and_calibrate(
     return timeline, video_info, time_offset, time_scale
 
 
-def build_overlay_video(
-    event_url: str,
-    source_video_path: str,
-    output_path: str,
-    on_log: Optional[Callable[[str], None]] = None,
-    on_progress: Optional[Callable[[float], None]] = None,
-    fps: int = DEFAULT_FPS,
-    workers: int = DEFAULT_WORKERS,
-    time_offset_override: Optional[float] = None,
-    time_scale_override: Optional[float] = None,
-    should_stop: Optional[Callable[[], bool]] = None,
-) -> bool:
-    """
-    Full pipeline: fetch the event's auction history, reconstruct a
-    timeline, render overlay frames, and composite them onto the source
-    video. Returns True on success.
-    """
-    log = on_log or (lambda msg: None)
-    progress = on_progress or (lambda pct: None)
-
-    def log_and_track_render(msg: str) -> None:
-        log(msg)
-        match = RENDER_PROGRESS_PATTERN.search(msg)
-        if match:
-            done, total = int(match.group(1)), int(match.group(2))
-            frac = done / total if total else 0
-            progress(TIMELINE_DONE_PCT + frac * (RENDER_DONE_PCT - TIMELINE_DONE_PCT))
-
-    def log_and_track_composite(msg: str) -> None:
-        log(msg)
-        match = COMPOSITE_PROGRESS_PATTERN.search(msg)
-        if match:
-            frac = float(match.group(1)) / 100
-            progress(RENDER_DONE_PCT + frac * (COMPOSITE_DONE_PCT - RENDER_DONE_PCT))
-
-    progress(0)
-    calibrated = _fetch_and_calibrate(
-        event_url, source_video_path, log, progress, time_offset_override, time_scale_override, should_stop,
-    )
-    if calibrated is None:
-        return False
-    if should_stop is not None and should_stop():
-        log("Stopped by user.")
-        return False
-    timeline, video_info, time_offset, time_scale = calibrated
-    duration = video_info["duration_seconds"]
-
-    with tempfile.TemporaryDirectory(prefix="overlay_frames_") as frames_dir:
-        log(f"Rendering overlay frames to {frames_dir} (fps={fps}, workers={workers})...")
-        render_frames(
-            timeline, 0, duration, fps, frames_dir,
-            video_width=video_info["width"], video_height=video_info["height"],
-            on_log=log_and_track_render, workers=workers, time_scale=time_scale, time_offset=time_offset,
-        )
-        progress(RENDER_DONE_PCT)
-
-        log("Compositing overlay onto video...")
-        success = composite_overlay(source_video_path, frames_dir, fps, output_path, on_log=log_and_track_composite)
-
-    if success:
-        progress(COMPOSITE_DONE_PCT)
-        log(f"Done! Output saved to {output_path}")
-    return success
-
-
 def _render_and_export_chroma_key(
-    timeline, duration: float, width: int, height: int, output_path: str,
+    timeline, start_offset: float, end_offset: float, width: int, height: int, output_path: str,
     fps: int, workers: int, time_offset: float, time_scale: float,
     log: Callable[[str], None], progress: Callable[[float], None],
 ) -> bool:
     """Shared render+export tail for build_chroma_key_overlay_video and
     build_standalone_chroma_key_overlay_video - the only difference between
-    them is how (timeline, duration, width, height, time_offset, time_scale)
-    get computed upstream (calibrated against a source video, or derived
-    directly from the event's own real start/end time)."""
+    them is how (timeline, start_offset/end_offset, width, height,
+    time_offset, time_scale) get computed upstream (calibrated against a
+    source video, or derived directly from the event's own real start/end
+    time). [start_offset, end_offset) are in *video* seconds - just the one
+    requested listing's clip, not the whole event (see
+    _clip_bounds_for_listing)."""
 
     def log_and_track_render(msg: str) -> None:
         log(msg)
@@ -188,14 +161,14 @@ def _render_and_export_chroma_key(
     with tempfile.TemporaryDirectory(prefix="overlay_frames_") as frames_dir:
         log(f"Rendering overlay frames to {frames_dir} (fps={fps}, workers={workers})...")
         render_frames(
-            timeline, 0, duration, fps, frames_dir,
+            timeline, start_offset, end_offset, fps, frames_dir,
             video_width=width, video_height=height,
             on_log=log_and_track_render, workers=workers, time_scale=time_scale, time_offset=time_offset,
         )
         progress(RENDER_DONE_PCT)
 
         log("Exporting standalone chroma-key overlay video...")
-        success = export_chroma_key_overlay(frames_dir, fps, duration, output_path, on_log=log_and_track_export)
+        success = export_chroma_key_overlay(frames_dir, fps, end_offset - start_offset, output_path, on_log=log_and_track_export)
 
     if success:
         progress(COMPOSITE_DONE_PCT)
@@ -207,6 +180,7 @@ def build_chroma_key_overlay_video(
     event_url: str,
     source_video_path: str,
     output_path: str,
+    listing_id: str,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[float], None]] = None,
     fps: int = DEFAULT_FPS,
@@ -216,13 +190,12 @@ def build_chroma_key_overlay_video(
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """
-    Same fetch/timeline/calibration/render steps as build_overlay_video, but
-    exports the rendered overlay as its own standalone chroma-key video
-    (see compose.export_chroma_key_overlay) instead of baking it onto a
-    copy of the source video - for use as a separate layer in external
-    editing software via chroma keying. source_video_path is only read
-    (probed for duration/resolution/calibration), never modified or
-    re-encoded.
+    Exports just one listing's auction overlay (by its eBay item number) as
+    its own standalone chroma-key video (see compose.export_chroma_key_overlay),
+    calibrated against a downloaded replay's actual duration/resolution -
+    for use as a separate layer in external editing software via chroma
+    keying. source_video_path is only read (probed for duration/resolution/
+    calibration), never modified or re-encoded.
     """
     log = on_log or (lambda msg: None)
     progress = on_progress or (lambda pct: None)
@@ -239,8 +212,14 @@ def build_chroma_key_overlay_video(
     timeline, video_info, time_offset, time_scale = calibrated
     duration = video_info["duration_seconds"]
 
+    real_duration = time_offset + duration * time_scale
+    bounds = _clip_bounds_for_listing(timeline, listing_id, real_duration, duration, time_offset, time_scale, log)
+    if bounds is None:
+        return False
+    start_offset, end_offset = bounds
+
     return _render_and_export_chroma_key(
-        timeline, duration, video_info["width"], video_info["height"], output_path,
+        timeline, start_offset, end_offset, video_info["width"], video_info["height"], output_path,
         fps, workers, time_offset, time_scale, log, progress,
     )
 
@@ -252,6 +231,7 @@ DEFAULT_STANDALONE_HEIGHT = 1280
 def build_standalone_chroma_key_overlay_video(
     event_url: str,
     output_path: str,
+    listing_id: str,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[float], None]] = None,
     fps: int = DEFAULT_FPS,
@@ -298,9 +278,14 @@ def build_standalone_chroma_key_overlay_video(
     if duration <= 0:
         log("Could not determine a valid event duration - aborting.")
         return False
-    log(f"Event duration: {duration:.0f}s - no source video, rendering at {width}x{height} in real time.")
+    log(f"Event duration: {duration:.0f}s - no source video, rendering at {width}x{height}.")
+
+    bounds = _clip_bounds_for_listing(timeline, listing_id, duration, duration, 0.0, 1.0, log)
+    if bounds is None:
+        return False
+    start_offset, end_offset = bounds
 
     return _render_and_export_chroma_key(
-        timeline, duration, width, height, output_path,
+        timeline, start_offset, end_offset, width, height, output_path,
         fps, workers, 0.0, 1.0, log, progress,
     )

@@ -46,77 +46,6 @@ def _parse_progress_block(lines: list) -> Optional[float]:
     return None
 
 
-def composite_overlay(
-    video_path: str,
-    overlay_frames_dir: str,
-    overlay_fps: int,
-    output_path: str,
-    on_log: Optional[Callable[[str], None]] = None,
-) -> bool:
-    """
-    Composites a PNG-sequence overlay (with alpha) onto a video with ffmpeg,
-    using hardware-accelerated encoding (h264_videotoolbox, macOS) since a
-    plain CPU encode of a multi-hour video is impractically slow. Keeps the
-    original audio untouched. Logs progress periodically instead of going
-    silent for the whole run. Returns True on success.
-    """
-    log = on_log or (lambda msg: None)
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-
-    video_info = probe_video(video_path)
-    source_fps = video_info["fps"] or overlay_fps
-    total_duration = video_info.get("duration_seconds")
-    log(f"Source video: {video_info}")
-
-    # Match the source's own bitrate rather than a fixed value - the overlay
-    # itself adds negligible entropy (a mostly-static card in one corner),
-    # so a full re-encode at anywhere near the source's real bitrate should
-    # land close to the original file size instead of needlessly inflating it.
-    target_bitrate_kbps = video_info.get("video_bitrate_kbps") or 3500
-    log(f"Encoding at {target_bitrate_kbps}k (matched to source) instead of a fixed rate.")
-
-    cmd = [
-        ffmpeg, "-y",
-        "-i", video_path,
-        "-framerate", str(overlay_fps),
-        "-i", f"{overlay_frames_dir}/overlay_%06d.png",
-        "-filter_complex",
-        f"[1:v]fps={source_fps}[ov];[0:v][ov]overlay=format=auto:shortest=1",
-        "-c:v", "h264_videotoolbox",
-        "-b:v", f"{target_bitrate_kbps}k",
-        "-c:a", "copy",
-        "-loglevel", "error",
-        "-progress", "pipe:1",
-        output_path,
-    ]
-    log(f"Running: {' '.join(cmd)}")
-
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-    assert process.stdout is not None
-
-    block: list = []
-    last_logged_pct = -10
-    for line in process.stdout:
-        line = line.strip()
-        block.append(line)
-        if line == "progress=continue" or line == "progress=end":
-            current_time = _parse_progress_block(block)
-            block = []
-            if current_time is not None and total_duration:
-                pct = min(100.0, current_time / total_duration * 100)
-                if pct - last_logged_pct >= 5:
-                    log(f"Compositing progress: {pct:.0f}% ({current_time:.0f}s / {total_duration:.0f}s)")
-                    last_logged_pct = pct
-
-    return_code = process.wait()
-    stderr_output = process.stderr.read() if process.stderr else ""
-    if return_code != 0:
-        log(f"ffmpeg failed:\n{stderr_output[-3000:]}")
-        return False
-    log(f"Composited output written to {output_path}")
-    return True
-
-
 def export_chroma_key_overlay(
     overlay_frames_dir: str,
     fps: int,
@@ -128,9 +57,9 @@ def export_chroma_key_overlay(
     Encodes the rendered PNG-sequence overlay (composited over a solid
     chroma-key blue background - see template.html) into its own
     standalone compressed .mp4, for use as a separate layer in external
-    editing software via chroma keying. Unlike composite_overlay, nothing
-    from the source video is baked in here - this is the overlay graphics
-    alone, meant to be keyed and layered over the original footage.
+    editing software via chroma keying. Nothing from the source video is
+    baked in here - this is the overlay graphics alone, meant to be keyed
+    and layered over the original footage.
 
     Blue rather than the more common green - the bid pill's own green
     (#4ce160) is close enough to pure chroma green that keying would eat

@@ -28,6 +28,7 @@ const resumeQueueBtn = document.getElementById("resumeQueueBtn");
 const clearQueueBtn = document.getElementById("clearQueueBtn");
 
 const overlayExportEventUrlInput = document.getElementById("overlayExportEventUrl");
+const overlayExportListingIdInput = document.getElementById("overlayExportListingId");
 const overlayExportTimeOffsetInput = document.getElementById("overlayExportTimeOffset");
 const overlayExportTimeScaleInput = document.getElementById("overlayExportTimeScale");
 const overlayExportBtn = document.getElementById("overlayExportBtn");
@@ -237,10 +238,15 @@ async function startOverlayExport() {
     alert("Please enter an eBay Live event URL.");
     return;
   }
+  const listingId = overlayExportListingIdInput.value.trim();
+  if (!listingId) {
+    alert("Please enter the item number of the auction to export.");
+    return;
+  }
 
   const timeOffsetRaw = overlayExportTimeOffsetInput.value.trim();
   const timeScaleRaw = overlayExportTimeScaleInput.value.trim();
-  const body = { event_url: eventUrl };
+  const body = { event_url: eventUrl, listing_id: listingId };
   if (timeOffsetRaw !== "") body.time_offset = parseFloat(timeOffsetRaw);
   if (timeScaleRaw !== "") body.time_scale = parseFloat(timeScaleRaw);
 

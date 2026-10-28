@@ -387,3 +387,31 @@ def build_timeline(history: dict, on_log: Optional[Callable[[str], None]] = None
     auctions = build_auction_segments(history.get("pin_updates", []), history["auctions"], start_dt, on_log)
     viewers = build_viewer_timeline(history.get("viewer_stats", []), start_dt)
     return OverlayTimeline(auctions, viewers)
+
+
+def find_listing_segment(
+    timeline: OverlayTimeline, listing_id: str, on_log: Optional[Callable[[str], None]] = None,
+) -> Optional[dict]:
+    """Locates the segment for one specific listing (eBay's own item
+    number), for exporting just that auction instead of the whole event.
+    A listing can legitimately be pinned more than once (flickers
+    pinned-then-unpinned before its real start, or gets briefly re-pinned
+    showing its already-sold result after ending - see
+    _build_pin_segments) - when that happens, prefers whichever occurrence
+    actually has bids (the real auction, not a flicker), falling back to
+    the longest one if none do."""
+    log = on_log or (lambda m: None)
+    listing_id = str(listing_id).strip()
+    matches = [seg for seg in timeline.auctions if str(seg.get("listing_id")) == listing_id]
+    if not matches:
+        log(f"No auction found for item number {listing_id} in this event.")
+        return None
+    if len(matches) > 1:
+        log(f"Item number {listing_id} was pinned {len(matches)} separate times - using the occurrence with the most real activity.")
+
+    def _sort_key(seg: dict) -> tuple:
+        end = seg.get("unpinned_offset")
+        duration = (end - seg["pinned_offset"]) if end is not None else float("inf")
+        return (len(seg.get("bids") or []), duration)
+
+    return max(matches, key=_sort_key)

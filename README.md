@@ -62,11 +62,12 @@ Add multiple event URLs to a queue to have them monitored and downloaded one
 after another, instead of babysitting a single event at a time.
 
 ### Export Auction Overlay
-Extracts the pinned auctions from an event into a separate video file with a
-blue background, for editors to key against. Paste an event URL here to
-export it, e.g. with custom calibration. Works even for an event you never
-downloaded a replay of, rendering directly from the event's own data instead
-(calibration fields are ignored in that case).
+Extracts one specific auction - by its eBay item number - into its own short
+video file with a blue background, for editors to key against. Paste an
+event URL and the item number here to export it, e.g. with custom
+calibration. Works even for an event you never downloaded a replay of,
+rendering directly from the event's own data instead (calibration fields are
+ignored in that case).
 
 ### Download Clip
 Extracts short clips by timestamp from an event's replay. Reuses an

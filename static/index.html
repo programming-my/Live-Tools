@@ -114,13 +114,16 @@
 
     <h2>Export Auction Overlay</h2>
     <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
-      Extracts pinned auctions into a separate video file with blue background for editors
-      to use. Paste an event URL here to export the overlay.
+      Extracts one auction into its own short video file with blue background for editors
+      to use. Paste an event URL and the item number of the specific auction you want.
     </p>
 
     <div class="card">
       <label for="overlayExportEventUrl">eBay Live event URL</label>
       <input id="overlayExportEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
+
+      <label for="overlayExportListingId">Item number</label>
+      <input id="overlayExportListingId" type="text" placeholder="e.g. 128137845687" />
 
       <div class="actions">
         <input id="overlayExportTimeOffset" type="number" step="0.1" placeholder="Time offset (s), auto" title="Seconds to add to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />

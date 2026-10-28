@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from overlay.timeline import build_auction_segments
+from overlay.timeline import OverlayTimeline, build_auction_segments, find_listing_segment
 
 START_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -69,3 +69,30 @@ def test_orphan_summary_logs_once_per_listing_not_once_per_event():
     assert per_event_lines == []
     summary_lines = [m for m in logs if "50 event(s)" in m]
     assert len(summary_lines) == 1
+
+
+def test_find_listing_segment_returns_none_for_unknown_item():
+    timeline = OverlayTimeline(auctions=[{"listing_id": "111", "pinned_offset": 0, "unpinned_offset": 10, "bids": []}], viewers=[])
+    assert find_listing_segment(timeline, "999") is None
+
+
+def test_find_listing_segment_matches_by_string_comparison():
+    """listing_id may come in as an int (from parsed event data) or a str
+    (from a user-typed item number) - must match either way."""
+    timeline = OverlayTimeline(auctions=[{"listing_id": 111, "pinned_offset": 0, "unpinned_offset": 10, "bids": []}], viewers=[])
+    found = find_listing_segment(timeline, "111")
+    assert found is not None
+    assert found["listing_id"] == 111
+
+
+def test_find_listing_segment_prefers_the_occurrence_with_real_bids():
+    """A listing pinned twice (a pre-start flicker, then the real auction)
+    must resolve to the one with actual bidding activity, not whichever
+    happens to be longer or come first."""
+    flicker = {"listing_id": "111", "pinned_offset": 0, "unpinned_offset": 500, "bids": []}
+    real = {"listing_id": "111", "pinned_offset": 600, "unpinned_offset": 650, "bids": [{"amount": 10}, {"amount": 20}]}
+    timeline = OverlayTimeline(auctions=[flicker, real], viewers=[])
+    logs = []
+    found = find_listing_segment(timeline, "111", on_log=logs.append)
+    assert found is real
+    assert any("pinned 2 separate times" in msg for msg in logs)
