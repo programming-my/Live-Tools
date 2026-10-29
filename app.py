@@ -92,8 +92,23 @@ def _parse_version(raw: str) -> Optional[tuple]:
     except ValueError:
         return None
 
+class _NoCacheStaticFiles(StaticFiles):
+    """Forces every /static response to revalidate (ETag/Last-Modified)
+    instead of letting the browser apply its own heuristic freshness
+    lifetime - without this, a browser can serve index.html/app.js straight
+    from disk cache with no request at all, even in a brand new tab, so a
+    just-updated or just-reinstalled app can appear to be running old code
+    (confirmed - this caused real confusion over a stale v1.7.0 UI). Only
+    applied to /static, not /downloads - cached replay/export files are
+    immutable once written, so default caching there is fine."""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 app = FastAPI()
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", _NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/downloads", StaticFiles(directory=DOWNLOADS_DIR), name="downloads")
 
 
@@ -1257,7 +1272,7 @@ def get_tunnel_status() -> dict:
 # websocket - never the downloader, queue, or settings - since it's the only
 # thing ever reachable through the tunnel above, which has no authentication.
 edge_app = FastAPI()
-edge_app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+edge_app.mount("/static", _NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 edge_app.get("/overlay/{event_id}")(live_overlay_page)
 edge_app.get("/overlay/{event_id}/mobile")(live_overlay_mobile_page)
 edge_app.websocket("/ws/{event_id}")(live_overlay_ws)

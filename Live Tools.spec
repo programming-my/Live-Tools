@@ -56,6 +56,19 @@
 #     sips -z $((size*2)) $((size*2)) "$SRC" --out "/tmp/ebay-tools-icon/AppIcon.iconset/icon_${size}x${size}@2x.png"
 #   done
 #   iconutil -c icns /tmp/ebay-tools-icon/AppIcon.iconset -o /tmp/ebay-tools-icon/AppIcon.icns
+#
+# Dock/Quit behavior: desktop_launcher.py registers a minimal NSApplication
+# on macOS (see _run_macos_app_lifecycle) so the Dock actually shows this as
+# a running app and Cmd+Q/right-click-Quit work, which needs
+# `pyobjc-framework-Cocoa` - NOT in requirements.txt (it's macOS-build-only,
+# same reasoning as pystray/pillow being separate installs for the Windows
+# build in .github/workflows/build-windows.yml), so install it into the
+# build venv before running pyinstaller:
+#   pip install pyobjc-framework-Cocoa
+# (needs a reasonably recent pip to pull prebuilt wheels rather than trying
+# to compile pyobjc-core from source, which fails on a newer Xcode/clang
+# toolchain - `pip install --upgrade pip` first if it tries to build from
+# source.)
 
 
 a = Analysis(
@@ -109,4 +122,5 @@ app = BUNDLE(
     name='Live Tools.app',
     icon='/tmp/ebay-tools-icon/AppIcon.icns',
     bundle_identifier=None,
+    info_plist={'NSPrincipalClass': 'NSApplication'},
 )

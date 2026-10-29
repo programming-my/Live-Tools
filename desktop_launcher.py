@@ -61,11 +61,9 @@ def _open_browser() -> None:
 
 
 def _run_tray_icon() -> None:
-    # macOS: a windowless GUI app still shows in the Dock, so Cmd+Q / right-
-    # click-Dock-icon-Quit already works with no extra code. Windows has no
-    # equivalent - a --windowed app with no window is invisible everywhere
-    # except Task Manager - so give it a system tray icon instead, purely so
-    # there's a way to quit.
+    # Windows: a --windowed app with no window is invisible everywhere except
+    # Task Manager, so give it a system tray icon purely so there's a way to
+    # quit.
     import pystray
     from PIL import Image
 
@@ -77,6 +75,45 @@ def _run_tray_icon() -> None:
     pystray.Icon("Live Tools", image, "Live Tools", menu).run()
 
 
+def _run_macos_app_lifecycle() -> None:
+    # macOS: this process never makes a single AppKit call, so it never
+    # connects to the Window Server - Finder/Dock show its icon (since it's a
+    # proper .app bundle) but never mark it as a running application: no
+    # "running" dot under the icon, Cmd+Q does nothing, and right-clicking
+    # the Dock icon offers no real Quit (confirmed - a prior comment here
+    # claimed this "just works" on macOS with no extra code, which turned out
+    # to be wrong). Registering a minimal NSApplication with a regular
+    # activation policy is what actually makes the Dock treat it as a normal
+    # running app, which brings the standard Cmd+Q / Dock-Quit behavior for
+    # free - no custom menu needed, unlike Windows' tray icon above.
+    #
+    # AppKit requires its run loop to own the main thread, so the uvicorn
+    # server runs on a background thread here instead (the reverse of every
+    # other platform/mode, where uvicorn.run() itself occupies the main
+    # thread).
+    from AppKit import NSApplication, NSApplicationActivationPolicyRegular
+    from Foundation import NSObject
+
+    class _AppDelegate(NSObject):
+        def applicationShouldTerminate_(self, _sender):
+            # Mirrors the Windows tray Quit handler: run our own cleanup
+            # before actually exiting, since AppKit's own termination
+            # machinery doesn't know to call back into tunnel.stop_tunnel().
+            tunnel.stop_tunnel()
+            os._exit(0)
+
+    threading.Thread(
+        target=lambda: uvicorn.run(app, host=HOST, port=PORT, log_level="warning"),
+        daemon=True,
+    ).start()
+
+    ns_app = NSApplication.sharedApplication()
+    ns_app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    delegate = _AppDelegate.alloc().init()
+    ns_app.setDelegate_(delegate)
+    ns_app.run()
+
+
 def main() -> None:
     if _already_running():
         # Double-launching the .app (e.g. double-clicked twice, or opened
@@ -85,6 +122,9 @@ def main() -> None:
         webbrowser.open(f"http://{HOST}:{PORT}")
         return
     threading.Thread(target=_open_browser, daemon=True).start()
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        _run_macos_app_lifecycle()
+        return
     if sys.platform == "win32" and getattr(sys, "frozen", False):
         threading.Thread(target=_run_tray_icon, daemon=True).start()
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
