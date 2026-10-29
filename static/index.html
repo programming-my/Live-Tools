@@ -112,56 +112,60 @@
       <div id="queueList" class="queue-list"></div>
     </div>
 
-    <h2>Export Auction Overlay</h2>
-    <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
-      Extracts one auction into its own short video file with blue background for editors
-      to use. Paste an event URL and the listing's title (or part of it) - it searches for
-      that auction and exports just its own clip, not the whole event.
-    </p>
+    <div id="overlayExportSection" class="hidden">
+      <h2>Export Auction Overlay</h2>
+      <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
+        Extracts one auction into its own short video file with blue background for editors
+        to use. Paste an event URL and the listing's title (or part of it) - it searches for
+        that auction and exports just its own clip, not the whole event.
+        <strong>Dev-server-only for now</strong> while this feature's design is still settling -
+        it won't appear in the packaged app.
+      </p>
 
-    <div class="card">
-      <label for="overlayExportEventUrl">eBay Live event URL</label>
-      <input id="overlayExportEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
+      <div class="card">
+        <label for="overlayExportEventUrl">eBay Live event URL</label>
+        <input id="overlayExportEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
 
-      <label for="overlayExportTitleQuery">Listing title</label>
-      <input id="overlayExportTitleQuery" type="text" placeholder="e.g. Vintage Rolex Watch" />
+        <label for="overlayExportTitleQuery">Listing title</label>
+        <input id="overlayExportTitleQuery" type="text" placeholder="e.g. Vintage Rolex Watch" />
 
-      <div class="actions">
-        <input id="overlayExportTimeOffset" type="number" step="0.1" placeholder="Time offset (s), auto" title="Seconds to add to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
-        <input id="overlayExportTimeScale" type="number" step="0.0001" placeholder="Time scale, auto" title="Multiplier applied to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
-      </div>
-
-      <div class="actions">
-        <button id="overlayExportBtn">Export overlay</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="status-row">
-        <label style="margin: 0;">Export status</label>
-        <span id="overlayExportStatusBadge" class="badge badge-idle hidden">IDLE</span>
-        <button id="overlayExportStopBtn" class="secondary" disabled>Stop</button>
-        <button id="overlayExportClearBtn" class="secondary">Clear</button>
-      </div>
-
-      <div id="overlayExportProgressRow" class="hidden">
-        <label>Export progress</label>
-        <div class="progress-bar">
-          <div id="overlayExportProgressFill" class="progress-fill" style="width: 0%"></div>
+        <div class="actions">
+          <input id="overlayExportTimeOffset" type="number" step="0.1" placeholder="Time offset (s), auto" title="Seconds to add to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
+          <input id="overlayExportTimeScale" type="number" step="0.0001" placeholder="Time scale, auto" title="Multiplier applied to the video's timeline before mapping onto the event's auction data. Leave blank to use the automatic scale-only estimate." />
         </div>
-        <span id="overlayExportProgressLabel">0%</span>
+
+        <div class="actions">
+          <button id="overlayExportBtn">Export overlay</button>
+        </div>
       </div>
 
-      <div id="overlayExportDownloadRow" class="hidden">
-        <a id="overlayExportDownloadLink" href="#" download>Download overlay video</a>
-      </div>
-    </div>
+      <div class="card">
+        <div class="status-row">
+          <label style="margin: 0;">Export status</label>
+          <span id="overlayExportStatusBadge" class="badge badge-idle hidden">IDLE</span>
+          <button id="overlayExportStopBtn" class="secondary" disabled>Stop</button>
+          <button id="overlayExportClearBtn" class="secondary">Clear</button>
+        </div>
 
-    <div class="card">
-      <details class="log-details">
-        <summary>Export log</summary>
-        <div id="overlayExportLog" class="log"></div>
-      </details>
+        <div id="overlayExportProgressRow" class="hidden">
+          <label>Export progress</label>
+          <div class="progress-bar">
+            <div id="overlayExportProgressFill" class="progress-fill" style="width: 0%"></div>
+          </div>
+          <span id="overlayExportProgressLabel">0%</span>
+        </div>
+
+        <div id="overlayExportDownloadRow" class="hidden">
+          <a id="overlayExportDownloadLink" href="#" download>Download overlay video</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <details class="log-details">
+          <summary>Export log</summary>
+          <div id="overlayExportLog" class="log"></div>
+        </details>
+      </div>
     </div>
 
     <h2>Download Clip</h2>

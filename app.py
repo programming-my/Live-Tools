@@ -72,6 +72,15 @@ MAX_DOWNLOAD_RETRIES = 3  # plus the initial attempt = up to 4 tries total
 APP_VERSION = "1.6.0"
 GITHUB_REPO = "programming-my/Live-Tools"
 
+# Export Auction Overlay is still being actively redesigned (item number ->
+# dropdown -> title search, all within this same release cycle) - keep it
+# available only when running from source (dev server) so it can keep
+# changing shape without going out in a packaged release before it's
+# settled. Checked both by the UI (to hide the section) and the API routes
+# themselves (so hitting them directly doesn't work in a packaged build
+# either, regardless of what the UI shows).
+OVERLAY_EXPORT_ENABLED = not getattr(sys, "frozen", False)
+
 
 def _parse_version(raw: str) -> Optional[tuple]:
     """'v1.2.0' / '1.2.0' -> (1, 2, 0), so versions compare numerically
@@ -925,7 +934,7 @@ def update_settings(req: SettingsRequest) -> dict:
 
 @app.get("/api/version")
 def get_version() -> dict:
-    return {"version": APP_VERSION}
+    return {"version": APP_VERSION, "overlay_export_enabled": OVERLAY_EXPORT_ENABLED}
 
 
 @app.get("/api/check-updates")
@@ -1040,8 +1049,17 @@ def remove_from_queue(item_id: str) -> dict:
     return queue_state.to_dict()
 
 
+def _require_overlay_export_enabled() -> None:
+    """Export Auction Overlay is dev-server-only for now (see
+    OVERLAY_EXPORT_ENABLED) - guards every route for it, not just the UI,
+    so a packaged build refuses the API too regardless of what hits it."""
+    if not OVERLAY_EXPORT_ENABLED:
+        raise HTTPException(status_code=404, detail="Export Auction Overlay isn't available in this build yet.")
+
+
 @app.post("/api/overlay-export")
 def start_overlay_export(req: OverlayExportRequest) -> dict:
+    _require_overlay_export_enabled()
     parsed = urlparse(req.event_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Please provide a valid http(s) event URL.")
@@ -1063,11 +1081,13 @@ def start_overlay_export(req: OverlayExportRequest) -> dict:
 
 @app.get("/api/overlay-export/status")
 def get_overlay_export_status() -> dict:
+    _require_overlay_export_enabled()
     return overlay_export_state.to_dict()
 
 
 @app.post("/api/overlay-export/stop")
 def stop_overlay_export() -> dict:
+    _require_overlay_export_enabled()
     if overlay_export_state.stop_event is not None:
         overlay_export_state.stop_event.set()
     return overlay_export_state.to_dict()
@@ -1075,6 +1095,7 @@ def stop_overlay_export() -> dict:
 
 @app.post("/api/overlay-export/clear")
 def clear_overlay_export() -> dict:
+    _require_overlay_export_enabled()
     if overlay_export_state.is_running():
         raise HTTPException(status_code=409, detail="An overlay export is running. Wait for it to finish before clearing.")
     overlay_export_state.clear()

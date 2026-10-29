@@ -84,10 +84,20 @@ async function loadSettings() {
   downloadsDirInput.value = settings.downloads_dir;
 }
 
+let overlayExportEnabled = false;
+
 async function loadAppVersion() {
   const res = await fetch("/api/version");
   const data = await res.json();
   appVersionLabel.textContent = `v${data.version}`;
+  // Export Auction Overlay is dev-server-only while its design is still
+  // settling (see app.py's OVERLAY_EXPORT_ENABLED) - hidden in a packaged
+  // build rather than just left visible-but-broken.
+  overlayExportEnabled = !!data.overlay_export_enabled;
+  document.getElementById("overlayExportSection").classList.toggle("hidden", !overlayExportEnabled);
+  if (overlayExportEnabled) {
+    refreshOverlayExportStatus();
+  }
 }
 
 async function checkForUpdates() {
@@ -629,7 +639,7 @@ function startPolling() {
   pollTimer = setInterval(() => {
     refreshStatus();
     refreshQueueStatus();
-    refreshOverlayExportStatus();
+    if (overlayExportEnabled) refreshOverlayExportStatus();
     refreshClipExportStatus();
   }, 2000);
 }
@@ -658,5 +668,4 @@ loadAppVersion();
 startPolling();
 refreshStatus();
 refreshQueueStatus();
-refreshOverlayExportStatus();
 refreshClipExportStatus();
