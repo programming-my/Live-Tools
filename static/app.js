@@ -7,9 +7,9 @@ const checkUpdatesBtn = document.getElementById("checkUpdatesBtn");
 const updateResultEl = document.getElementById("updateResultText");
 
 const urlInput = document.getElementById("url");
-const intervalInput = document.getElementById("interval");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
+const clearBtn = document.getElementById("clearBtn");
 const statusBadge = document.getElementById("statusBadge");
 const m3u8Row = document.getElementById("m3u8Row");
 const m3u8UrlInput = document.getElementById("m3u8Url");
@@ -20,7 +20,6 @@ const downloadRow = document.getElementById("downloadRow");
 const downloadLink = document.getElementById("downloadLink");
 const logEl = document.getElementById("log");
 
-const queueUrlInput = document.getElementById("queueUrl");
 const queueAddBtn = document.getElementById("queueAddBtn");
 const queueListEl = document.getElementById("queueList");
 const queuePausedBadge = document.getElementById("queuePausedBadge");
@@ -56,7 +55,9 @@ const clipExportLogEl = document.getElementById("clipExportLog");
 
 const BADGE_CLASSES = {
   IDLE: "badge-idle",
+  CHECKING: "badge-waiting",
   WAITING: "badge-waiting",
+  NOT_ENDED: "badge-waiting",
   LIVE: "badge-live",
   ENDED: "badge-ended",
   UNKNOWN: "badge-waiting",
@@ -169,7 +170,6 @@ async function saveSettings() {
 
 async function startJob() {
   const url = urlInput.value.trim();
-  const pollInterval = parseInt(intervalInput.value, 10) || 15;
   if (!url) {
     alert("Please enter an eBay Live event URL.");
     return;
@@ -178,12 +178,12 @@ async function startJob() {
   const res = await fetch("/api/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, poll_interval: pollInterval }),
+    body: JSON.stringify({ url }),
   });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    alert(body.detail || "Failed to start monitoring.");
+    alert(body.detail || "Failed to start the download.");
     return;
   }
 
@@ -196,8 +196,19 @@ async function stopJob() {
   refreshStatus();
 }
 
+async function clearJob() {
+  const res = await fetch("/api/clear", { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || "Failed to clear.");
+    return;
+  }
+  renderMainLog.reset();
+  refreshStatus();
+}
+
 async function addToQueue() {
-  const url = queueUrlInput.value.trim();
+  const url = urlInput.value.trim();
   if (!url) {
     alert("Please enter an eBay Live event URL.");
     return;
@@ -215,7 +226,7 @@ async function addToQueue() {
     return;
   }
 
-  queueUrlInput.value = "";
+  urlInput.value = "";
   refreshQueueStatus();
 }
 
@@ -458,6 +469,8 @@ function render(state) {
 
   startBtn.disabled = state.running;
   stopBtn.disabled = !state.running;
+  queueAddBtn.disabled = !state.running;
+  clearBtn.disabled = state.running;
 
   if (state.url && !urlInput.value) {
     urlInput.value = state.url;
@@ -652,6 +665,7 @@ settingsGearBtn.addEventListener("click", (e) => {
 });
 startBtn.addEventListener("click", startJob);
 stopBtn.addEventListener("click", stopJob);
+clearBtn.addEventListener("click", clearJob);
 queueAddBtn.addEventListener("click", addToQueue);
 resumeQueueBtn.addEventListener("click", resumeQueue);
 clearQueueBtn.addEventListener("click", clearQueue);

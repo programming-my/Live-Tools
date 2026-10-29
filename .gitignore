@@ -9,3 +9,4 @@ downloads/
 download_queue.json
 seller_state.json
 MeipassCheck.spec
+logs/

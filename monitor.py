@@ -375,47 +375,6 @@ def download_replay_with_progress(
     return _download_with_ffmpeg(m3u8_url, output_path, on_progress, should_stop)
 
 
-def monitor_loop(
-    url: str,
-    poll_interval: int,
-    on_status: Callable[[str, Optional[str]], None],
-    on_log: Callable[[str], None],
-    should_stop: Callable[[], bool],
-) -> None:
-    """
-    Monitors the eBay Live stream until it ends or should_stop() returns True.
-    Calls on_status(status, m3u8_url) after every poll, and on_log(message) for
-    human-readable log lines. Returns when the event has ENDED (with or without
-    a replay) or when stopped.
-    """
-    on_log(f"Starting eBay Live monitor for: {url}")
-    on_log(f"Checking every {poll_interval} seconds...")
-
-    while not should_stop():
-        status, m3u8_url, error_message = check_event_status(url)
-        if error_message:
-            on_log(f"Network or parsing error: {error_message}")
-
-        on_status(status, m3u8_url)
-
-        if status == "LIVE":
-            on_log("Event is currently LIVE. Waiting for it to end...")
-        elif status == "ENDED":
-            on_log("Event has ENDED!")
-            if m3u8_url:
-                return
-            else:
-                on_log(f"Event ended, but no replay m3u8 stream was found. Retrying in {poll_interval}s...")
-        else:
-            on_log(f"Status: {status}. Waiting...")
-
-        if should_stop():
-            break
-        should_stop_result = wait_or_stop(poll_interval, should_stop)
-        if should_stop_result:
-            break
-
-
 def wait_or_stop(seconds: int, should_stop: Callable[[], bool]) -> bool:
     """Sleeps in small increments so a stop request is picked up quickly."""
     elapsed = 0.0

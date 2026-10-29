@@ -42,20 +42,18 @@
 
     <h2>Live Replay Downloader</h2>
     <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
-      Checks the event page every few seconds (the poll interval below) to see whether
-      it's still live. Once it detects the event has ended and a replay is ready, the
-      download starts automatically - no need to keep checking back yourself.
+      Paste an event URL and click <strong>Download Replay</strong> once the event has
+      ended. To line up multiple downloads, click <strong>Add to Queue</strong> - they
+      download one after another.
     </p>
 
     <div class="card">
       <label for="url">eBay Live event URL</label>
       <input id="url" type="text" placeholder="https://www.ebay.com/live/events/..." />
 
-      <label for="interval">Poll interval (seconds)</label>
-      <input id="interval" type="number" value="15" min="3" />
-
       <div class="actions">
-        <button id="startBtn">Start monitoring</button>
+        <button id="startBtn">Download Replay</button>
+        <button id="queueAddBtn" disabled>Add to Queue</button>
         <button id="stopBtn" class="secondary">Stop</button>
       </div>
     </div>
@@ -64,6 +62,7 @@
       <div class="status-row">
         <span>Status:</span>
         <span id="statusBadge" class="badge badge-idle">IDLE</span>
+        <button id="clearBtn" class="secondary">Clear</button>
       </div>
 
       <div id="m3u8Row" class="hidden">
@@ -85,24 +84,6 @@
     </div>
 
     <div class="card">
-      <details class="log-details">
-        <summary>Log</summary>
-        <div id="log" class="log"></div>
-      </details>
-    </div>
-
-    <h2>Download Queue</h2>
-
-    <div class="card">
-      <label for="queueUrl">eBay Live event URL</label>
-      <input id="queueUrl" type="text" placeholder="https://www.ebay.com/live/events/..." />
-
-      <div class="actions">
-        <button id="queueAddBtn">Add to queue</button>
-      </div>
-    </div>
-
-    <div class="card">
       <div class="status-row">
         <label style="margin: 0;">Queue</label>
         <span id="queuePausedBadge" class="badge badge-skipped hidden">PAUSED</span>
@@ -110,6 +91,13 @@
         <button id="clearQueueBtn" class="secondary">Clear queue</button>
       </div>
       <div id="queueList" class="queue-list"></div>
+    </div>
+
+    <div class="card">
+      <details class="log-details">
+        <summary>Log</summary>
+        <div id="log" class="log"></div>
+      </details>
     </div>
 
     <div id="overlayExportSection" class="hidden">
@@ -170,19 +158,14 @@
 
     <h2>Download Clip</h2>
     <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 16px;">
-      Extracts short clips by timestamp from an event's replay. Reuses an already-downloaded
-      file if you have one; otherwise it fetches just the segments covering the requested
-      range directly from the replay manifest (seconds, not a full download), falling back
-      to a full download only if that isn't possible for a given event. Clips are cut fast
-      (no re-encoding), so the exact start/end may land a couple seconds off from what you
-      typed, snapping to the nearest keyframe in the source.
+      Extracts short clips by timestamp from an event's replay.
     </p>
 
     <div class="card">
       <label for="clipExportEventUrl">eBay Live event URL</label>
       <input id="clipExportEventUrl" type="text" placeholder="https://www.ebay.com/ebaylive/events/.../stream" />
 
-      <label>Clips (start/end timestamps - mm:ss or hh:mm:ss)</label>
+      <label>Clips (start/end timestamps)</label>
       <div id="clipRows"></div>
 
       <div class="actions">
@@ -223,10 +206,8 @@
     <p style="color: #9aa1ac; font-size: 13px; margin: -8px 0 10px;">
       Extracts chat and auction data in real time while the event is live. Talent View is
       optimized for vertical monitors to show chat and auctions. Copy OBS URL to display the
-      full eBay Live UI as a browser source. Both links work from anywhere, not just this
-      computer (a sharing tunnel starts automatically when the app launches, so it's usually
-      already connected) - treat them as sensitive for as long as the app is running, since
-      anyone with the link can view them, no login required.
+      full eBay Live UI as a browser source. Wait until the tunnel is connected for
+      shareable links. This app must stay running for the links to function.
     </p>
     <div class="status-row" style="margin: -2px 0 16px;">
       <span id="tunnelStatusBadge" class="badge badge-idle hidden">IDLE</span>

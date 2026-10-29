@@ -26,7 +26,7 @@ from app_paths import app_support_dir
 from download_queue import QueueState
 from live.auth import extract_event_id
 from live.session import EventSession
-from monitor import check_event_status, download_replay_with_progress, fetch_event_start_date, monitor_loop
+from monitor import check_event_status, download_replay_with_progress, fetch_event_start_date
 from overlay.pipeline import build_chroma_key_overlay_video, build_standalone_chroma_key_overlay_video
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,7 +64,6 @@ _saved_downloads_dir = _load_settings().get("downloads_dir")
 DOWNLOADS_DIR = _saved_downloads_dir if _saved_downloads_dir else _default_downloads_dir()
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-DEFAULT_EVENT_POLL_INTERVAL = 15
 MAX_DOWNLOAD_RETRIES = 3  # plus the initial attempt = up to 4 tries total
 
 # Bump this on every release posted to GITHUB_REPO's Releases page - compared
@@ -107,22 +106,27 @@ class JobState:
 
     def _reset_locked(self) -> None:
         self.url: Optional[str] = None
-        self.poll_interval: int = DEFAULT_EVENT_POLL_INTERVAL
         self.status: str = "IDLE"
         self.m3u8_url: Optional[str] = None
         self.logs: deque = deque(maxlen=200)
         self.download_progress: Optional[float] = None
         self.download_filename: Optional[str] = None
 
-    def reset(self, url: str, poll_interval: int) -> None:
+    def reset(self, url: str) -> None:
         with self.lock:
             self._reset_locked()
             self.url = url
-            self.poll_interval = poll_interval
-            self.status = "WAITING"
+            self.status = "CHECKING"
 
     def is_running(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
+
+    def clear(self) -> None:
+        """Resets back to a blank IDLE state - lets the "Clear" button dismiss
+        a stopped/finished/errored run's status and log rather than leaving
+        them on screen until the next download overwrites them."""
+        with self.lock:
+            self._reset_locked()
 
     def log(self, message: str) -> None:
         with self.lock:
@@ -152,7 +156,6 @@ class JobState:
         with self.lock:
             return {
                 "url": self.url,
-                "poll_interval": self.poll_interval,
                 "status": self.status,
                 "m3u8_url": self.m3u8_url,
                 "logs": list(self.logs),
@@ -490,7 +493,6 @@ class SettingsRequest(BaseModel):
 
 class StartRequest(BaseModel):
     url: str
-    poll_interval: int = DEFAULT_EVENT_POLL_INTERVAL
 
 
 class QueueAddRequest(BaseModel):
@@ -532,15 +534,15 @@ def _live_get_or_start(event_id: str, event_url: str) -> EventSession:
     return session
 
 
-def _try_start_job(url: str, poll_interval: int, queue_item: Optional[dict] = None) -> bool:
-    """Starts a monitoring job if the single job slot is free. Returns whether it started."""
+def _try_start_job(url: str, queue_item: Optional[dict] = None) -> bool:
+    """Starts a download job if the single job slot is free. Returns whether it started."""
     with job_start_lock:
         if state.is_running():
             return False
-        state.reset(url, poll_interval)
+        state.reset(url)
         stop_event = threading.Event()
         state.stop_event = stop_event
-        thread = threading.Thread(target=_run_job, args=(url, poll_interval, stop_event, queue_item), daemon=True)
+        thread = threading.Thread(target=_run_job, args=(url, stop_event, queue_item), daemon=True)
         state.thread = thread
         thread.start()
         return True
@@ -593,89 +595,96 @@ def _maybe_start_next_from_queue() -> None:
     item = queue_state.pop_next_queued()
     if item is None:
         return
-    started = _try_start_job(item["url"], DEFAULT_EVENT_POLL_INTERVAL, queue_item=item)
+    started = _try_start_job(item["url"], queue_item=item)
     if not started:
         # Lost a race with another start - put it back for the next attempt.
         queue_state.set_item_status(item, "QUEUED")
 
 
-def _run_job(url: str, poll_interval: int, stop_event: threading.Event, queue_item: Optional[dict] = None) -> None:
-    def on_status(status: str, m3u8_url: Optional[str]) -> None:
-        state.set_status(status, m3u8_url)
-
-    def on_log(message: str) -> None:
-        state.log(message)
-
+def _run_job(url: str, stop_event: threading.Event, queue_item: Optional[dict] = None) -> None:
     def should_stop() -> bool:
         return stop_event.is_set()
 
     try:
         try:
-            monitor_loop(url, poll_interval, on_status, on_log, should_stop)
+            status, m3u8_url_checked, error_message = check_event_status(url)
         except Exception as e:
-            state.log(f"Unexpected monitor error: {e}")
+            state.log(f"Unexpected error checking event status: {e}")
             state.set_error()
             _persist_failed_job_log(url, state.to_dict()["logs"])
             return
 
         if stop_event.is_set():
-            state.log("Monitoring stopped by user.")
+            state.log("Download stopped by user.")
             state.set_status("IDLE")
             return
 
-        snapshot = state.to_dict()
-        if snapshot["status"] == "ENDED" and snapshot["m3u8_url"]:
-            m3u8_url = snapshot["m3u8_url"]
-            state.log("Starting download via yt-dlp...")
-            state.set_status("DOWNLOADING")
-            state.set_progress(0)
+        if status == "ERROR":
+            state.log(f"Could not check event status: {error_message}")
+            state.set_error()
+            _persist_failed_job_log(url, state.to_dict()["logs"])
+            return
 
-            event_date = fetch_event_start_date(url)
-            date_prefix = f"{event_date} " if event_date else ""
-            filename = f"{date_prefix}ebay_replay_{int(time.time())}.mp4"
-            output_path = os.path.join(DOWNLOADS_DIR, filename)
-
-            def on_progress(percent: Optional[float], line: str) -> None:
-                if percent is not None:
-                    state.set_progress(percent)
-                state.log(line)
-
-            success = False
-            for attempt in range(MAX_DOWNLOAD_RETRIES + 1):
-                if attempt > 0:
-                    state.log(f"Retrying download (attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES + 1})...")
-                    state.set_progress(0)
-
-                try:
-                    success = download_replay_with_progress(m3u8_url, output_path, on_progress, should_stop)
-                except FileNotFoundError:
-                    state.log("yt-dlp not found. Install it with 'pip install yt-dlp' inside the venv.")
-                    state.set_error()
-                    _persist_failed_job_log(url, state.to_dict()["logs"])
-                    return
-
-                if success or stop_event.is_set():
-                    break
-                _cleanup_partial_download(output_path)
-
-            if success:
-                state.log(f"Download complete! File saved to: downloads/{filename}")
-                state.set_done(filename)
-                try:
-                    with open(_sidecar_path(filename), "w") as f:
-                        json.dump({"event_url": url, "downloaded_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
-                except OSError as e:
-                    state.log(f"Could not write metadata sidecar: {e}")
-            elif stop_event.is_set():
-                state.log("Download stopped by user - partial file removed.")
-                state.set_status("IDLE")
-                _cleanup_partial_download(output_path)
-                return
+        if status != "ENDED" or not m3u8_url_checked:
+            if status == "ENDED":
+                state.log("Event ended, but no replay stream was found yet. Try again in a bit.")
             else:
-                state.log(f"yt-dlp exited with an error after {MAX_DOWNLOAD_RETRIES + 1} attempts.")
+                state.log("Event hasn't ended yet - try again once it has.")
+            state.set_status("NOT_ENDED")
+            return
+
+        state.set_status("ENDED", m3u8_url_checked)
+        m3u8_url = m3u8_url_checked
+        state.log("Starting download via yt-dlp...")
+        state.set_status("DOWNLOADING")
+        state.set_progress(0)
+
+        event_date = fetch_event_start_date(url)
+        date_prefix = f"{event_date} " if event_date else ""
+        filename = f"{date_prefix}ebay_replay_{int(time.time())}.mp4"
+        output_path = os.path.join(DOWNLOADS_DIR, filename)
+
+        def on_progress(percent: Optional[float], line: str) -> None:
+            if percent is not None:
+                state.set_progress(percent)
+            state.log(line)
+
+        success = False
+        for attempt in range(MAX_DOWNLOAD_RETRIES + 1):
+            if attempt > 0:
+                state.log(f"Retrying download (attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES + 1})...")
+                state.set_progress(0)
+
+            try:
+                success = download_replay_with_progress(m3u8_url, output_path, on_progress, should_stop)
+            except FileNotFoundError:
+                state.log("yt-dlp not found. Install it with 'pip install yt-dlp' inside the venv.")
                 state.set_error()
-                _cleanup_partial_download(output_path)
                 _persist_failed_job_log(url, state.to_dict()["logs"])
+                return
+
+            if success or stop_event.is_set():
+                break
+            _cleanup_partial_download(output_path)
+
+        if success:
+            state.log(f"Download complete! File saved to: downloads/{filename}")
+            state.set_done(filename)
+            try:
+                with open(_sidecar_path(filename), "w") as f:
+                    json.dump({"event_url": url, "downloaded_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
+            except OSError as e:
+                state.log(f"Could not write metadata sidecar: {e}")
+        elif stop_event.is_set():
+            state.log("Download stopped by user - partial file removed.")
+            state.set_status("IDLE")
+            _cleanup_partial_download(output_path)
+            return
+        else:
+            state.log(f"yt-dlp exited with an error after {MAX_DOWNLOAD_RETRIES + 1} attempts.")
+            state.set_error()
+            _cleanup_partial_download(output_path)
+            _persist_failed_job_log(url, state.to_dict()["logs"])
     finally:
         if queue_item is not None:
             final_status = state.to_dict()["status"]
@@ -983,12 +992,9 @@ def start_job(req: StartRequest) -> dict:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Please provide a valid http(s) URL.")
 
-    if req.poll_interval < 3:
-        raise HTTPException(status_code=400, detail="poll_interval must be at least 3 seconds.")
-
-    started = _try_start_job(req.url, req.poll_interval)
+    started = _try_start_job(req.url)
     if not started:
-        raise HTTPException(status_code=409, detail="A monitoring job is already running. Stop it first.")
+        raise HTTPException(status_code=409, detail="A download is already running. Stop it first.")
 
     return state.to_dict()
 
@@ -1002,6 +1008,14 @@ def stop_job() -> dict:
 
 @app.get("/api/status")
 def get_status() -> dict:
+    return state.to_dict()
+
+
+@app.post("/api/clear")
+def clear_job() -> dict:
+    if state.is_running():
+        raise HTTPException(status_code=409, detail="A download is running. Stop it first before clearing.")
+    state.clear()
     return state.to_dict()
 
 

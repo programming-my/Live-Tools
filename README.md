@@ -51,15 +51,16 @@ from the same **⚙ Settings** menu.
 ## Features
 
 ### Live Replay Downloader
-Paste an eBay Live event URL and click **Start monitoring**. The app polls
-the event page on the interval you set, shows LIVE/ENDED status and logs in
-real time, and automatically starts downloading the replay as soon as the
-event ends and a replay manifest becomes available - no need to keep
-checking back yourself.
+Paste an eBay Live event URL once the event has ended and click **Download
+Replay** - it checks the event once and starts downloading right away if a
+replay is ready, logging progress in real time. If the event hasn't ended
+yet, it tells you so plainly instead of waiting around in the background;
+just try again once it has.
 
-### Download Queue
-Add multiple event URLs to a queue to have them monitored and downloaded one
-after another, instead of babysitting a single event at a time.
+To line up more than one, paste a URL and click **Add to Queue** instead -
+queued events download one after another. Add to Queue is only enabled
+while a download is already in progress (otherwise there's nothing to
+queue behind - use Download Replay directly).
 
 ### Export Auction Overlay
 Extracts one specific auction into its own short video file with a blue
@@ -123,7 +124,7 @@ open it from the home screen icon instead of Safari - it launches in
 - Detection relies on scraping eBay's page HTML/JSON for status markers and
   replay manifest URLs, so it may need updating if eBay changes their page
   structure.
-- Only one monitoring job (outside the queue) runs at a time.
+- Only one download (outside the queue) runs at a time.
 - There's no authentication on this app - it's meant to run locally on your
   own machine, not be exposed to the internet.
 
