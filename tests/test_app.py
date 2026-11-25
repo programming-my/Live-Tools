@@ -158,3 +158,26 @@ def test_clear_job_refuses_while_a_download_is_running(clean_job_state):
         assert exc_info.value.status_code == 409
     finally:
         app.state.thread = None
+
+
+def test_ensure_stream_suffix_appends_when_missing():
+    assert app._ensure_stream_suffix(
+        "https://www.ebay.com/ebaylive/events/abc123"
+    ) == "https://www.ebay.com/ebaylive/events/abc123/stream"
+
+
+def test_ensure_stream_suffix_is_a_noop_when_already_present():
+    url = "https://www.ebay.com/ebaylive/events/abc123/stream"
+    assert app._ensure_stream_suffix(url) == url
+
+
+def test_ensure_stream_suffix_strips_trailing_slash_before_appending():
+    assert app._ensure_stream_suffix(
+        "https://www.ebay.com/ebaylive/events/abc123/"
+    ) == "https://www.ebay.com/ebaylive/events/abc123/stream"
+
+
+def test_ensure_stream_suffix_preserves_query_string():
+    assert app._ensure_stream_suffix(
+        "https://www.ebay.com/ebaylive/events/abc123?foo=bar"
+    ) == "https://www.ebay.com/ebaylive/events/abc123/stream?foo=bar"

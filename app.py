@@ -10,7 +10,7 @@ import threading
 import time
 from collections import deque
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 import uvicorn
@@ -351,13 +351,8 @@ class OverlayExportState:
         self.logs: deque = deque(maxlen=5000)
         self.output_filename: Optional[str] = None
         self.progress: Optional[float] = None
-        self.time_offset: Optional[float] = None
-        self.time_scale: Optional[float] = None
 
-    def reset(
-        self, filename: str, event_url: str, title_query: str,
-        time_offset: Optional[float] = None, time_scale: Optional[float] = None,
-    ) -> None:
+    def reset(self, filename: str, event_url: str, title_query: Optional[str]) -> None:
         with self.lock:
             self._reset_locked()
             self.filename = filename
@@ -365,8 +360,6 @@ class OverlayExportState:
             self.title_query = title_query
             self.status = "RUNNING"
             self.progress = 0
-            self.time_offset = time_offset
-            self.time_scale = time_scale
 
     def is_running(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
@@ -406,8 +399,6 @@ class OverlayExportState:
                 "logs": list(self.logs),
                 "output_filename": self.output_filename,
                 "progress": self.progress,
-                "time_offset": self.time_offset,
-                "time_scale": self.time_scale,
                 "running": self.is_running(),
             }
 
@@ -516,9 +507,7 @@ class QueueAddRequest(BaseModel):
 
 class OverlayExportRequest(BaseModel):
     event_url: str
-    title_query: str
-    time_offset: Optional[float] = None
-    time_scale: Optional[float] = None
+    title_query: Optional[str] = None
 
 
 class ClipRequest(BaseModel):
@@ -563,40 +552,37 @@ def _try_start_job(url: str, queue_item: Optional[dict] = None) -> bool:
         return True
 
 
-def _try_start_overlay_export(
-    filename: Optional[str], event_url: str, title_query: str,
-    time_offset: Optional[float] = None, time_scale: Optional[float] = None,
-) -> bool:
+def _try_start_overlay_export(filename: Optional[str], event_url: str, title_query: Optional[str]) -> bool:
     """Starts an overlay-export job if the single export slot is free. Returns
     whether it started. filename is the downloads-relative replay to
     calibrate against, when one was found for this event (see
     _find_download_for_event) - if None, the export instead renders directly
     from the event's own data with no source video (see
-    build_standalone_chroma_key_overlay_video), and time_offset/time_scale
-    are ignored (there's nothing to calibrate against). Exports just the
-    one auction matching title_query, not the whole event - the output
-    filename includes a slug of the query so exporting a second item for
-    the same event/replay gets its own file instead of overwriting the
-    first (the real listing_id isn't known until the search inside the job
-    itself finds it - see overlay.protocol.fetch_history_for_title)."""
+    build_standalone_chroma_key_overlay_video). If title_query is given,
+    exports just the one matching auction - the output filename includes a
+    slug of the query so exporting a second item for the same event/replay
+    gets its own file instead of overwriting the first (the real listing_id
+    isn't known until the search inside the job itself finds it - see
+    overlay.protocol.fetch_history_for_title). With no title_query, exports
+    the whole event instead, slugged as "full-event"."""
     with overlay_export_start_lock:
         if overlay_export_state.is_running():
             return False
-        title_slug = re.sub(r"[^A-Za-z0-9]+", "-", title_query.strip()).strip("-").lower()[:40] or "item"
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", title_query.strip()).strip("-").lower()[:40] or "item" if title_query else "full-event"
         if filename:
             source_path = os.path.join(DOWNLOADS_DIR, filename)
             stem, _ext = os.path.splitext(filename)
-            output_path = os.path.join(DOWNLOADS_DIR, f"{stem}_overlay_{title_slug}.mp4")
+            output_path = os.path.join(DOWNLOADS_DIR, f"{stem}_overlay_{slug}.mp4")
         else:
             source_path = None
             event_id = extract_event_id(event_url) or "event"
-            output_path = os.path.join(DOWNLOADS_DIR, f"overlay_{event_id}_{title_slug}_{int(time.time())}.mp4")
-        overlay_export_state.reset(filename, event_url, title_query, time_offset, time_scale)
+            output_path = os.path.join(DOWNLOADS_DIR, f"overlay_{event_id}_{slug}_{int(time.time())}.mp4")
+        overlay_export_state.reset(filename, event_url, title_query)
         stop_event = threading.Event()
         overlay_export_state.stop_event = stop_event
         thread = threading.Thread(
             target=_run_overlay_export,
-            args=(event_url, source_path, output_path, title_query, time_offset, time_scale, stop_event),
+            args=(event_url, source_path, output_path, title_query, stop_event),
             daemon=True,
         )
         overlay_export_state.thread = thread
@@ -719,8 +705,7 @@ def _run_job(url: str, stop_event: threading.Event, queue_item: Optional[dict] =
 
 
 def _run_overlay_export(
-    event_url: str, source_path: Optional[str], output_path: str, title_query: str,
-    time_offset: Optional[float] = None, time_scale: Optional[float] = None,
+    event_url: str, source_path: Optional[str], output_path: str, title_query: Optional[str],
     stop_event: Optional[threading.Event] = None,
 ) -> None:
     def on_log(message: str) -> None:
@@ -733,7 +718,7 @@ def _run_overlay_export(
         if source_path is not None:
             success = build_chroma_key_overlay_video(
                 event_url, source_path, output_path, title_query, on_log=on_log, on_progress=overlay_export_state.set_progress,
-                time_offset_override=time_offset, time_scale_override=time_scale, should_stop=should_stop,
+                should_stop=should_stop,
             )
         else:
             on_log("No downloaded replay found for this event - rendering directly from the event's own data instead.")
@@ -1001,13 +986,27 @@ def index() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
+def _ensure_stream_suffix(url: str) -> str:
+    """People sometimes paste an event URL without the trailing "/stream"
+    (e.g. copied before the page finished redirecting) - check_event_status
+    fetches exactly the URL it's given, and the page without /stream doesn't
+    reliably expose the same LIVE/ENDED/replay markers, so add it
+    automatically instead of silently misbehaving. A no-op if it's already
+    there. Only touches the path, leaving any query string/fragment alone."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/stream"):
+        return url
+    return urlunparse(parsed._replace(path=path + "/stream"))
+
+
 @app.post("/api/start")
 def start_job(req: StartRequest) -> dict:
     parsed = urlparse(req.url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Please provide a valid http(s) URL.")
 
-    started = _try_start_job(req.url)
+    started = _try_start_job(_ensure_stream_suffix(req.url))
     if not started:
         raise HTTPException(status_code=409, detail="A download is already running. Stop it first.")
 
@@ -1040,7 +1039,7 @@ def add_to_queue(req: QueueAddRequest) -> dict:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Please provide a valid http(s) URL.")
 
-    queue_state.add(req.url)
+    queue_state.add(_ensure_stream_suffix(req.url))
     _maybe_start_next_from_queue()
     return queue_state.to_dict()
 
@@ -1093,15 +1092,10 @@ def start_overlay_export(req: OverlayExportRequest) -> dict:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Please provide a valid http(s) event URL.")
 
-    title_query = req.title_query.strip()
-    if not title_query:
-        raise HTTPException(status_code=400, detail="Please enter the listing title to search for.")
-
-    if req.time_scale is not None and req.time_scale <= 0:
-        raise HTTPException(status_code=400, detail="time_scale must be positive.")
+    title_query = (req.title_query or "").strip() or None
 
     filename = _find_download_for_event(req.event_url)
-    started = _try_start_overlay_export(filename, req.event_url, title_query, req.time_offset, req.time_scale)
+    started = _try_start_overlay_export(filename, req.event_url, title_query)
     if not started:
         raise HTTPException(status_code=409, detail="An overlay export is already running. Wait for it to finish.")
 
@@ -1223,6 +1217,12 @@ async def live_overlay_page(event_id: str) -> FileResponse:
 
 @app.get("/overlay/{event_id}/mobile")
 async def live_overlay_mobile_page(event_id: str) -> FileResponse:
+    """Scales to fit whatever size the browser/OBS source actually renders
+    at (portrait, landscape, anything between) instead of clipping/padding
+    - see overlay_mobile.css/overlay_mobile_scale.js. This used to be a
+    fixed 1080x1920-only canvas, with the scaling version offered
+    separately at /adaptive while it was still being tried out - now
+    proven out and promoted to replace it outright."""
     _live_get_or_start(event_id, _live_canonical_url(event_id))
     return FileResponse(os.path.join(STATIC_DIR, "overlay_mobile.html"))
 

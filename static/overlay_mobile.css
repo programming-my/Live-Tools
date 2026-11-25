@@ -8,10 +8,8 @@ html, body {
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
 }
-/* Centers the fixed-size canvas below if the actual browser/OBS source
-   window isn't exactly 1080x1920 - harmless once the source *is* set to
-   that exact size (the intended real usage), just a nicer fallback when
-   previewing this page in an ordinary browser tab. */
+/* Centers the scaled canvas below within whatever size the browser/OBS
+   source actually renders at - see overlay_mobile_scale.js. */
 body {
   display: flex;
   align-items: center;
@@ -19,26 +17,23 @@ body {
 }
 .hidden { display: none !important; }
 
-/* Fixed 9:16 (1080x1920) canvas - does NOT scale with the browser/OBS
-   window size. All sizing below is in px (not vw/vh), computed against
-   this fixed 1080-wide/1920-tall box, so the whole layout is pixel-locked
-   regardless of the actual viewport. Set your OBS Browser Source (or
-   whatever renders this page) to exactly 1080x1920 for a pixel-exact
-   result; anything else will just clip/pad rather than reflow.
-
-   This is a mostly-static text/UI overlay (no continuous full-canvas
-   animation - just occasional DOM updates: a chat message appended, the
-   auction timer ticking once a second), so the jump from 720x1280 to
-   1080x1920 (2.25x the pixels) has little effect on OBS's rendering cost
-   in practice - that's dominated by how often things repaint, not by
-   viewport size. If capture performance ever becomes a real issue, check
-   OBS's own hardware-acceleration setting for browser sources first (CPU
-   rendering it there would hurt far more than this resolution bump). */
+/* Fixed 9:16 (1080x1920) design - every size below is still in px against
+   this same box - but instead of pixel-locking regardless of viewport,
+   overlay_mobile_scale.js computes
+   --overlay-scale = min(viewport_width/1080, viewport_height/1920) on load
+   and on resize, and the transform below applies it - the whole design
+   scales and stays centered as one proportioned unit ("contain" behavior),
+   so it looks right anywhere from portrait (1080x1920) through square and
+   everything in between. Past that (wider than tall), the landscape media
+   query further down drops this transform and actually reflows the layout
+   instead of just scaling it - see the comment there. */
 .overlay {
   position: relative;
   width: 1080px;
   height: 1920px;
   flex-shrink: 0;
+  transform: scale(var(--overlay-scale, 1));
+  transform-origin: center center;
   padding: env(safe-area-inset-top) env(safe-area-inset-right)
            env(safe-area-inset-bottom) env(safe-area-inset-left);
   color: #fff;
@@ -49,7 +44,7 @@ body {
   top: 2.5%;
   left: 3%;
   z-index: 2;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.85);
   color: #fff;
   border-radius: 999px;
   padding: 9px 19.5px;
@@ -103,7 +98,7 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 27px;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(0, 0, 0, 0.8);
   border-radius: 33px;
   padding: 24px 16.5px;
   z-index: 1;
@@ -257,7 +252,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.8);
   border: 2.25px solid rgba(255, 255, 255, 0.5);
   border-radius: 999px;
   padding: 18px 27px;
@@ -274,7 +269,10 @@ body {
 .auction-card {
   flex-shrink: 0;
   width: 100%;
-  background: rgba(18, 18, 18, 0.94);
+  /* Darker than the other grey elements (.comment-input, .side-rail,
+     .status-pill, all at 0.8/0.85) - deliberately near-opaque so the card
+     reads as a solid panel rather than letting busy video show through. */
+  background: rgba(0, 0, 0, 0.95);
   border-radius: 33px;
   padding: 33px 37.5px;
 }
@@ -400,4 +398,167 @@ body {
   height: 25.5px;
   width: auto;
   flex-shrink: 0;
+}
+
+/* --- Landscape reflow (wider than tall): instead of staying a small
+   9:16-shaped box with empty space on the sides, actually use the wide
+   frame - chat becomes a left-hand column (filling the full height
+   instead of capping out partway up), and the auction card/comment-input
+   move to the bottom of the remaining main area on the right. header/
+   side-rail need no changes - already anchored to the top corners.
+
+   No HTML/JS changes needed for this: chat-panel/comment-input/
+   auction-card are already siblings inside .bottom-stack, so the reflow is
+   just reassigning them to named CSS Grid areas - overlay_mobile.js only
+   ever looks elements up by id, it doesn't care about layout.
+
+   Sizes below are the exact same numbers as the portrait rules above,
+   just converted from px (against the portrait design's 1080px-wide
+   reference) to vh (against a landscape frame's 1080px-tall reference at
+   its own native 1920x1080 size - the two reference numbers happen to be
+   identical, so this is a straight unit conversion, not new sizes invented
+   from scratch): vh = px / 10.8. */
+@media (orientation: landscape) {
+  .overlay {
+    width: 100%;
+    height: 100%;
+    transform: none;
+  }
+
+  .status-pill {
+    padding: 0.83vh 1.81vh;
+    font-size: 1.67vh;
+  }
+
+  .header { gap: 1.53vh; }
+  .header-back { font-size: 4.03vh; }
+  .header-avatar,
+  .header-avatar-fallback {
+    width: 6.94vh;
+    height: 6.94vh;
+    border-width: 0.28vh;
+  }
+  .header-username { font-size: 3.19vh; }
+
+  .side-rail {
+    gap: 2.5vh;
+    border-radius: 3.06vh;
+    padding: 2.22vh 1.53vh;
+  }
+  .side-rail-row { gap: 0.42vh; font-size: 1.67vh; }
+  .side-rail-viewers { font-size: 2.36vh; }
+  .live-dot { width: 1.67vh; height: 1.67vh; margin-bottom: 0.42vh; }
+  .side-rail-icon { width: 4.03vh; height: 4.03vh; }
+  .side-rail-dots { font-size: 3.06vh; letter-spacing: 0.14vh; }
+
+  /* Right column is sized to the card itself (auto), not a fixed share of
+     the frame - chat+comment then naturally fill 100% of whatever's left,
+     from the screen's left edge to the card's left edge, however small or
+     large the card ends up being. The card spans both rows and hugs the
+     bottom of that combined span (its own corner), independent of
+     chat/comment's sizing - it shares no row with either of them, so its
+     height can't inflate theirs. Chat sits directly above comment-input
+     (adjacent rows, same column) with only the grid gap between them. */
+  .bottom-stack {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-rows: 1fr auto;
+    grid-template-areas:
+      "chat    card"
+      "comment card";
+    gap: 1.94vh 2.78vh;
+  }
+  .auction-card {
+    grid-area: card;
+    /* Same real width the card has in portrait (94% of the 1080px design -
+       see .bottom-stack's left/right: 3%), times the exact same scale
+       factor overlay_mobile_scale.js already computes for letterboxing
+       the whole design in portrait/square mode - not a different/smaller
+       size invented for landscape. Explicit width (not transform: scale,
+       which wouldn't shrink the grid column it occupies, leaving chat/
+       comment unable to start right before it) so column2's "auto" track
+       sizes to this correctly and chat/comment still fill everything to
+       its left, up to the screen's left edge. */
+    width: calc(1015.2px * var(--overlay-scale, 1));
+    justify-self: end;
+    align-self: end;
+  }
+  .comment-input { grid-area: comment; }
+  .chat-panel {
+    grid-area: chat;
+    max-height: none;
+    gap: 1.25vh;
+  }
+
+  .pinned-message { gap: 1.25vh; }
+  .pinned-icon { font-size: 2.78vh; }
+  .pinned-user { font-size: 1.94vh; }
+  .pinned-text { font-size: 2.36vh; }
+
+  .chat-messages {
+    gap: 1.67vh;
+    padding: 0 0.56vh;
+    -webkit-mask-image: linear-gradient(to top, black 0vh, black 19.44vh, transparent 54.17vh, transparent 100%);
+    mask-image: linear-gradient(to top, black 0vh, black 19.44vh, transparent 54.17vh, transparent 100%);
+  }
+  .chat-message .chat-user { font-size: 1.94vh; }
+  .chat-message .chat-text { font-size: 2.36vh; }
+
+  .comment-input {
+    border-width: 0.21vh;
+    padding: 1.67vh 2.5vh;
+  }
+  .comment-input-placeholder { font-size: 2.22vh; }
+  .comment-input-heart { font-size: 2.64vh; }
+
+  /* Every value below is exactly the portrait rule's own px number (see
+     the shared, unprefixed rules above - e.g. .auction-title's 30px),
+     wrapped in the same calc(... * var(--overlay-scale, 1)) used for the
+     card's width - this keeps every proportion (padding, gaps, font
+     sizes, button layout) identical to the vertical design, just
+     uniformly smaller, rather than a separately-tuned landscape size.
+     Button layout itself is untouched (still side by side, not stacked) -
+     no override needed since nothing here changes it. */
+  .auction-card {
+    border-radius: calc(33px * var(--overlay-scale, 1));
+    padding: calc(33px * var(--overlay-scale, 1)) calc(37.5px * var(--overlay-scale, 1));
+  }
+  .auction-title-row {
+    gap: calc(16.5px * var(--overlay-scale, 1));
+    margin-bottom: calc(18px * var(--overlay-scale, 1));
+  }
+  .auction-title { font-size: calc(30px * var(--overlay-scale, 1)); }
+  .auction-chevron { font-size: calc(43.5px * var(--overlay-scale, 1)); }
+  .auction-price {
+    font-size: calc(45px * var(--overlay-scale, 1));
+    margin-bottom: calc(18px * var(--overlay-scale, 1));
+  }
+  .auction-status-row { margin-bottom: calc(21px * var(--overlay-scale, 1)); }
+  .auction-winner { font-size: calc(42px * var(--overlay-scale, 1)); }
+  .auction-timer {
+    font-size: calc(45px * var(--overlay-scale, 1));
+    margin-left: calc(21px * var(--overlay-scale, 1));
+  }
+  .auction-buttons {
+    gap: calc(25.5px * var(--overlay-scale, 1));
+    height: calc(93px * var(--overlay-scale, 1));
+  }
+  .btn-max-bid {
+    border-width: calc(3px * var(--overlay-scale, 1));
+    padding: 0 calc(48px * var(--overlay-scale, 1));
+    font-size: calc(45px * var(--overlay-scale, 1));
+  }
+  .btn-bid { border-width: calc(3px * var(--overlay-scale, 1)); }
+  .btn-bid-fill {
+    gap: calc(16.5px * var(--overlay-scale, 1));
+    padding: 0 calc(48px * var(--overlay-scale, 1));
+    font-size: calc(45px * var(--overlay-scale, 1));
+  }
+  .btn-bid-fill.muted {
+    top: calc(-4.5px * var(--overlay-scale, 1));
+    left: calc(-4.5px * var(--overlay-scale, 1));
+    right: calc(-4.5px * var(--overlay-scale, 1));
+    bottom: calc(-4.5px * var(--overlay-scale, 1));
+  }
+  .btn-bid-fill svg { height: calc(25.5px * var(--overlay-scale, 1)); }
 }

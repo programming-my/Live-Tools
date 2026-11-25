@@ -28,8 +28,6 @@ const clearQueueBtn = document.getElementById("clearQueueBtn");
 
 const overlayExportEventUrlInput = document.getElementById("overlayExportEventUrl");
 const overlayExportTitleQueryInput = document.getElementById("overlayExportTitleQuery");
-const overlayExportTimeOffsetInput = document.getElementById("overlayExportTimeOffset");
-const overlayExportTimeScaleInput = document.getElementById("overlayExportTimeScale");
 const overlayExportBtn = document.getElementById("overlayExportBtn");
 const overlayExportStatusBadge = document.getElementById("overlayExportStatusBadge");
 const overlayExportStopBtn = document.getElementById("overlayExportStopBtn");
@@ -260,16 +258,7 @@ async function startOverlayExport() {
     return;
   }
   const titleQuery = overlayExportTitleQueryInput.value.trim();
-  if (!titleQuery) {
-    alert("Please enter the listing title to search for.");
-    return;
-  }
-
-  const timeOffsetRaw = overlayExportTimeOffsetInput.value.trim();
-  const timeScaleRaw = overlayExportTimeScaleInput.value.trim();
-  const body = { event_url: eventUrl, title_query: titleQuery };
-  if (timeOffsetRaw !== "") body.time_offset = parseFloat(timeOffsetRaw);
-  if (timeScaleRaw !== "") body.time_scale = parseFloat(timeScaleRaw);
+  const body = { event_url: eventUrl, title_query: titleQuery || null };
 
   const res = await fetch("/api/overlay-export", {
     method: "POST",

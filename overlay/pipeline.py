@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from .compose import export_chroma_key_overlay, probe_video
-from .protocol import fetch_history_for_title
+from .protocol import fetch_full_history, fetch_history_for_title
 from .render import render_frames
 from .timeline import build_timeline, find_listing_segment
 
@@ -62,45 +62,55 @@ def _clip_bounds_for_listing(
     return video_start, video_end
 
 
-def _fetch_history_for_title_and_build_timeline(
-    event_url: str, title_query: str,
+def _fetch_history_and_build_timeline(
+    event_url: str, title_query: Optional[str],
     on_log: Callable[[str], None], on_progress: Callable[[float], None],
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[tuple]:
-    """Searches for title_query (see protocol.fetch_history_for_title -
-    stops scanning pin/listing history as soon as a complete match is
-    found, then fetches auction/bid events only for that matched segment's
-    own narrow range, not the whole event) and builds a timeline from
-    whatever that targeted fetch returned. Returns (history, timeline,
-    matched_listing_id), or None if nothing matched anywhere in the event."""
-    history = fetch_history_for_title(
-        event_url, title_query, on_log=on_log, should_stop=should_stop,
-        on_progress=lambda frac: on_progress(frac * FETCH_DONE_PCT),
-    )
-    on_progress(FETCH_DONE_PCT)
-    if history is None:
-        return None
+    """If title_query is given, searches for it (see
+    protocol.fetch_history_for_title - stops scanning pin/listing history as
+    soon as a complete match is found, then fetches auction/bid events only
+    for that matched segment's own narrow range, not the whole event).
+    Otherwise fetches the event's complete history (protocol.fetch_full_history)
+    for a full-event export. Returns (history, timeline, matched_listing_id) -
+    matched_listing_id is None for a full-event export - or None if a title
+    was given but nothing matched anywhere in the event."""
+    if title_query:
+        history = fetch_history_for_title(
+            event_url, title_query, on_log=on_log, should_stop=should_stop,
+            on_progress=lambda frac: on_progress(frac * FETCH_DONE_PCT),
+        )
+        on_progress(FETCH_DONE_PCT)
+        if history is None:
+            return None
+        matched_listing_id = history["matched_listing_id"]
+    else:
+        history = fetch_full_history(
+            event_url, on_log=on_log, should_stop=should_stop,
+            on_progress=lambda frac: on_progress(frac * FETCH_DONE_PCT),
+        )
+        on_progress(FETCH_DONE_PCT)
+        matched_listing_id = None
 
     on_log("Reconstructing timeline...")
     timeline = build_timeline(history, on_log=on_log)
-    return history, timeline, history["matched_listing_id"]
+    return history, timeline, matched_listing_id
 
 
 def _fetch_and_calibrate(
-    event_url: str, title_query: str, source_video_path: str, log: Callable[[str], None], progress: Callable[[float], None],
-    time_offset_override: Optional[float], time_scale_override: Optional[float],
+    event_url: str, title_query: Optional[str], source_video_path: str, log: Callable[[str], None], progress: Callable[[float], None],
     should_stop: Optional[Callable[[], bool]] = None,
 ):
     """
-    Shared first half of both pipelines: search for title_query and fetch
-    just its own segment's data (see
-    _fetch_history_for_title_and_build_timeline), probe the source video,
-    and compute the time_offset/time_scale mapping from video-seconds to
-    real-event-seconds. Returns (timeline, matched_listing_id, video_info,
-    time_offset, time_scale), or None if no match was found or the video's
-    duration couldn't be determined (nothing usable to render against).
+    Shared first half of both pipelines: fetch either one listing's segment
+    or the whole event's history (see _fetch_history_and_build_timeline),
+    probe the source video, and compute the time_offset/time_scale mapping
+    from video-seconds to real-event-seconds. Returns (timeline,
+    matched_listing_id, video_info, time_offset, time_scale), or None if a
+    title was given but not found, or the video's duration couldn't be
+    determined (nothing usable to render against).
     """
-    found = _fetch_history_for_title_and_build_timeline(event_url, title_query, log, progress, should_stop)
+    found = _fetch_history_and_build_timeline(event_url, title_query, log, progress, should_stop)
     if found is None:
         return None
     history, timeline, matched_listing_id = found
@@ -117,18 +127,11 @@ def _fetch_and_calibrate(
     # (start_time..end_time) exactly - dropped/missing HLS segments are common
     # over a multi-hour recording - so video-second N isn't real-event-second N.
     # Rescale so the timeline lookup tracks the video's actual pace instead of
-    # drifting further behind (or ahead) the longer the video runs.
-    #
-    # This scale-only correction does NOT account for the replay recording
-    # simply starting some seconds after the event's official start_time (a
-    # fixed lag, not a proportional drift) - the page's startTime and the
-    # LiveEventStarted message agree with each other but neither reflects
-    # when the video's actual first frame was captured, and nothing in the
-    # metadata reveals that gap. When known (from calibrating against a few
-    # real-world reference points), pass time_offset_override/
-    # time_scale_override to correct for it; otherwise this falls back to
-    # the scale-only estimate, which is usually a large improvement over no
-    # correction but can still leave a residual constant-ish lag.
+    # drifting further behind (or ahead) the longer the video runs. This does
+    # NOT account for the replay recording simply starting some seconds after
+    # the event's official start_time (a fixed lag, not a proportional drift) -
+    # nothing in the metadata reveals that gap, so this scale-only estimate
+    # can still leave a residual constant-ish lag.
     time_offset = 0.0
     time_scale = 1.0
     if history.get("end_time"):
@@ -138,13 +141,6 @@ def _fetch_and_calibrate(
         if real_duration > 0:
             time_scale = real_duration / duration
             log(f"Real event window: {real_duration:.0f}s vs video: {duration:.0f}s -> time_scale={time_scale:.4f}")
-
-    if time_offset_override is not None:
-        time_offset = time_offset_override
-    if time_scale_override is not None:
-        time_scale = time_scale_override
-    if time_offset_override is not None or time_scale_override is not None:
-        log(f"Using calibrated time mapping: time_offset={time_offset:.2f}, time_scale={time_scale:.4f}")
 
     return timeline, matched_listing_id, video_info, time_offset, time_scale
 
@@ -200,31 +196,28 @@ def build_chroma_key_overlay_video(
     event_url: str,
     source_video_path: str,
     output_path: str,
-    title_query: str,
+    title_query: Optional[str] = None,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[float], None]] = None,
     fps: int = DEFAULT_FPS,
     workers: int = DEFAULT_WORKERS,
-    time_offset_override: Optional[float] = None,
-    time_scale_override: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """
-    Exports just one listing's auction overlay (found by title_query - a
-    case-insensitive substring match against its pinned listing title) as
-    its own standalone chroma-key video (see compose.export_chroma_key_overlay),
-    calibrated against a downloaded replay's actual duration/resolution -
-    for use as a separate layer in external editing software via chroma
-    keying. source_video_path is only read (probed for duration/resolution/
+    Exports an auction overlay as its own standalone chroma-key video (see
+    compose.export_chroma_key_overlay), calibrated against a downloaded
+    replay's actual duration/resolution - for use as a separate layer in
+    external editing software via chroma keying. If title_query is given,
+    exports just the one listing it matches (a case-insensitive substring
+    match against its pinned listing title); otherwise exports the whole
+    event. source_video_path is only read (probed for duration/resolution/
     calibration), never modified or re-encoded.
     """
     log = on_log or (lambda msg: None)
     progress = on_progress or (lambda pct: None)
 
     progress(0)
-    calibrated = _fetch_and_calibrate(
-        event_url, title_query, source_video_path, log, progress, time_offset_override, time_scale_override, should_stop,
-    )
+    calibrated = _fetch_and_calibrate(event_url, title_query, source_video_path, log, progress, should_stop)
     if calibrated is None:
         return False
     if should_stop is not None and should_stop():
@@ -233,11 +226,15 @@ def build_chroma_key_overlay_video(
     timeline, matched_listing_id, video_info, time_offset, time_scale = calibrated
     duration = video_info["duration_seconds"]
 
-    real_duration = time_offset + duration * time_scale
-    bounds = _clip_bounds_for_listing(timeline, matched_listing_id, real_duration, duration, time_offset, time_scale, log)
-    if bounds is None:
-        return False
-    start_offset, end_offset = bounds
+    if matched_listing_id is not None:
+        real_duration = time_offset + duration * time_scale
+        bounds = _clip_bounds_for_listing(timeline, matched_listing_id, real_duration, duration, time_offset, time_scale, log)
+        if bounds is None:
+            return False
+        start_offset, end_offset = bounds
+    else:
+        start_offset, end_offset = 0.0, duration
+        log(f"Exporting the full event overlay: {start_offset:.1f}s..{end_offset:.1f}s ({end_offset - start_offset:.1f}s).")
 
     return _render_and_export_chroma_key(
         timeline, start_offset, end_offset, video_info["width"], video_info["height"], output_path,
@@ -252,7 +249,7 @@ DEFAULT_STANDALONE_HEIGHT = 1280
 def build_standalone_chroma_key_overlay_video(
     event_url: str,
     output_path: str,
-    title_query: str,
+    title_query: Optional[str] = None,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[float], None]] = None,
     fps: int = DEFAULT_FPS,
@@ -274,7 +271,7 @@ def build_standalone_chroma_key_overlay_video(
     progress = on_progress or (lambda pct: None)
 
     progress(0)
-    found = _fetch_history_for_title_and_build_timeline(event_url, title_query, log, progress, should_stop)
+    found = _fetch_history_and_build_timeline(event_url, title_query, log, progress, should_stop)
     if found is None:
         return False
     history, timeline, matched_listing_id = found
@@ -295,10 +292,14 @@ def build_standalone_chroma_key_overlay_video(
         return False
     log(f"Event duration: {duration:.0f}s - no source video, rendering at {width}x{height}.")
 
-    bounds = _clip_bounds_for_listing(timeline, matched_listing_id, duration, duration, 0.0, 1.0, log)
-    if bounds is None:
-        return False
-    start_offset, end_offset = bounds
+    if matched_listing_id is not None:
+        bounds = _clip_bounds_for_listing(timeline, matched_listing_id, duration, duration, 0.0, 1.0, log)
+        if bounds is None:
+            return False
+        start_offset, end_offset = bounds
+    else:
+        start_offset, end_offset = 0.0, duration
+        log(f"Exporting the full event overlay: {start_offset:.1f}s..{end_offset:.1f}s ({end_offset - start_offset:.1f}s).")
 
     return _render_and_export_chroma_key(
         timeline, start_offset, end_offset, width, height, output_path,

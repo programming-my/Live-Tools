@@ -63,14 +63,14 @@ while a download is already in progress (otherwise there's nothing to
 queue behind - use Download Replay directly).
 
 ### Export Auction Overlay
-Extracts one specific auction into its own short video file with a blue
-background, for editors to key against. Paste an event URL and the listing's
-title (or part of it) - it searches the event's pin/listing history for a
-match, stopping as soon as it finds one rather than scanning the whole event
-first, then fetches and renders just that auction's own clip, e.g. with
-custom calibration. Works even for an event you never downloaded a replay
-of, rendering directly from the event's own data instead (calibration
-fields are ignored in that case).
+Extracts an auction overlay into its own short video file with a blue
+background, for editors to key against. Paste an event URL and, optionally,
+a listing's title (or part of it) - it searches the event's pin/listing
+history for a match, stopping as soon as it finds one rather than scanning
+the whole event first, then fetches and renders just that auction's own
+clip. Leave the title blank to export the whole event instead. Works even
+for an event you never downloaded a replay of, rendering directly from the
+event's own data instead.
 
 ### Download Clip
 Extracts short clips by timestamp from an event's replay. Reuses an
@@ -92,12 +92,16 @@ into this section and click **Start watching**; each watched event then
 gives you:
 - **Open Talent View** - the overlay page with chat font-size controls visible.
 - **Copy OBS URL** - the same page with controls hidden, for a clean
-  browser-source capture in OBS.
+  browser-source capture in OBS. Optimized for an exact 1080x1920 browser
+  source, but scales cleanly to whatever size you actually resize it to
+  (portrait, landscape, square, anything between) instead of clipping -
+  past a landscape aspect ratio, chat and the auction card reflow into a
+  side-by-side layout to use the wide space instead of just shrinking.
 
 Both links work from anywhere, not just this machine - a
 [Cloudflare quick tunnel](https://github.com/cloudflare/cloudflared) starts
 automatically as soon as the app launches, so it's usually already connected
-by the time you click either button. Only the overlay pages themselves are
+by the time you click any of them. Only the overlay pages themselves are
 ever reachable through it - the downloader, queue, and settings stay
 local-only no matter what. There's still no login on the overlay pages,
 though, so treat the link as sensitive **for as long as the app is
